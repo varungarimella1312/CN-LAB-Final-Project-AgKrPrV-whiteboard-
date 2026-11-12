@@ -517,8 +517,19 @@ class WhiteboardApp:
         chat_frame.pack(fill=tk.BOTH, expand=True, pady=2)
 
         self.text_chat = tk.Text(
-            chat_frame, wrap=tk.WORD, height=14, state=tk.DISABLED, bg="#F9F9F9", font=("Helvetica", 9)
+            chat_frame,
+            wrap=tk.WORD,
+            height=14,
+            state=tk.DISABLED,
+            bg="#FFFFFF",
+            fg="#1A202C",
+            insertbackground="#1A202C",
+            selectbackground="#CBD5E0",
+            selectforeground="#1A202C",
+            font=("Helvetica", 9),
         )
+        self.text_chat.tag_configure("time", foreground="#718096", font=("Helvetica", 8))
+        self.text_chat.tag_configure("msg", foreground="#1A202C", font=("Helvetica", 9))
         self.text_chat.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         chat_scroll = ttk.Scrollbar(chat_frame, orient=tk.VERTICAL, command=self.text_chat.yview)
@@ -531,7 +542,8 @@ class WhiteboardApp:
 
         self.entry_chat = ttk.Entry(send_frame)
         self.entry_chat.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
-        self.entry_chat.bind("<Return>", lambda e: self.on_send_chat())
+        self.entry_chat.bind("<Return>", self.on_send_chat)
+        self.entry_chat.bind("<KP_Enter>", self.on_send_chat)
 
         btn_send = ttk.Button(send_frame, text="Send", width=6, command=self.on_send_chat)
         btn_send.pack(side=tk.RIGHT)
@@ -683,14 +695,15 @@ class WhiteboardApp:
             self.btn_present.config(text="Present: OFF")
         self.update_role_permissions()
 
-    def on_send_chat(self) -> None:
+    def on_send_chat(self, event: Optional[tk.Event] = None) -> Optional[str]:
         """Sends chat text to server and clears entry field."""
         text = self.entry_chat.get().strip()
         if not text:
-            return
+            return "break"
         if self.net:
             self.net.send({"t": "chat", "text": text})
         self.entry_chat.delete(0, tk.END)
+        return "break"
 
     def update_role_permissions(self) -> None:
         """Enables/disables GUI controls based on current member role and presentation mode."""
@@ -1300,14 +1313,20 @@ class WhiteboardApp:
         self.text_chat.config(state=tk.DISABLED)
 
     def _append_chat_item(self, chat_item: Dict[str, Any]) -> None:
-        """Formats and inserts a single chat item with timestamp."""
+        """Formats and inserts a single chat item with timestamp and author color."""
         ts = chat_item.get("ts", time.time())
         t_str = time.strftime("%H:%M:%S", time.localtime(ts))
         user = chat_item.get("user", chat_item.get("u", "User"))
         text = chat_item.get("text", "")
+        color = chat_item.get("color", "#2B6CB0")
 
-        self.text_chat.insert(tk.END, f"[{t_str}] {user}: ", "bold")
-        self.text_chat.insert(tk.END, f"{text}\n")
+        # Dynamic user tag with their allocated palette color
+        user_tag = f"user_{user}"
+        self.text_chat.tag_configure(user_tag, foreground=color, font=("Helvetica", 9, "bold"))
+
+        self.text_chat.insert(tk.END, f"[{t_str}] ", "time")
+        self.text_chat.insert(tk.END, f"{user}: ", user_tag)
+        self.text_chat.insert(tk.END, f"{text}\n", "msg")
         self.text_chat.see(tk.END)
 
     def _handle_versions_list(self, msg: Dict[str, Any]) -> None:
