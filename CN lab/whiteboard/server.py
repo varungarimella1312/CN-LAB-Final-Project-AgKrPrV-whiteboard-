@@ -771,6 +771,8 @@ class ClientSession:
                 self._handle_setrole(member, msg)
             elif msg_type == "present":
                 self._handle_present(member, msg)
+            elif msg_type == "kick":
+                self._handle_kick(member, msg)
             elif msg_type == "ping":
                 self.send_msg({"t": "pong", "ts": msg.get("ts")})
             elif msg_type == "leave":
@@ -1283,6 +1285,58 @@ class ClientSession:
             "t": "present",
             "on": on,
             "by": member.user,
+        })
+
+    def _handle_kick(self, member: Member, msg: Dict[str, Any]) -> None:
+        """Kicks a participant from the room (host only)."""
+        if member.role != "host":
+            self.send_msg({
+                "t": "err",
+                "code": "denied",
+                "msg": "Only the host can kick participants",
+                "fatal": False,
+            })
+            return
+
+        target_user = msg.get("user")
+        assert self.room is not None
+        if not target_user or target_user not in self.room.members:
+            self.send_msg({
+                "t": "err",
+                "code": "no_user",
+                "msg": f"User '{target_user}' not found in room",
+                "fatal": False,
+            })
+            return
+
+        target_member = self.room.members[target_user]
+        if target_member.role == "host":
+            self.send_msg({
+                "t": "err",
+                "code": "cannot_kick_host",
+                "msg": "Cannot kick the room host",
+                "fatal": False,
+            })
+            return
+
+        # Notify target client before closing
+        if target_member.session:
+            target_member.session.send_msg({
+                "t": "err",
+                "code": "kicked",
+                "msg": f"You were kicked from the room by host {member.user}",
+                "fatal": True,
+            })
+            target_member.session.close_graceful_and_exit()
+
+        del self.room.members[target_user]
+        self.room.broadcast({
+            "t": "users",
+            "users": [m.to_dict() for m in self.room.members.values()],
+        })
+        self.room.broadcast({
+            "t": "notice",
+            "msg": f"{target_user} was kicked from the room by host {member.user}",
         })
 
     def _handle_disconnect(self) -> None:

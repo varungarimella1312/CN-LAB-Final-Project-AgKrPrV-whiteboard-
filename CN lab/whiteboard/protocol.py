@@ -187,3 +187,12 @@ def send_msg(sock: socket.socket, obj: Any) -> None:
         OSError: If socket transmission fails.
     """
     sock.sendall(encode(obj))
+
+
+# --- Drawing tool names (must match VALID_TOOLS in server.py exactly) ---
+TOOL_PEN = "pen"
+TOOL_ERASER = "eraser"
+TOOL_LINE = "line"
+TOOL_RECTANGLE = "rect"
+TOOL_OVAL = "oval"
+TOOL_TEXT = "text"

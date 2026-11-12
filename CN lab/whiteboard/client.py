@@ -119,11 +119,13 @@ class WhiteboardApp:
         self.session_token: Optional[str] = None
         self.my_role: str = "editor"  # "host", "editor", "viewer"
         self.my_color: str = "#000000"
+        self.presentation_mode: bool = False
 
         # Active Drawing Settings
         self.current_tool: str = "pen"  # pen, eraser, line, rect, oval, text
         self.current_color: str = "#000000"
         self.current_width: int = 3
+        self.lbl_width_val: Optional[ttk.Label] = None
 
         # Ephemeral Local Drawing State
         self.is_drawing: bool = False
@@ -274,6 +276,11 @@ class WhiteboardApp:
             self.net = None
 
         # Reset local canvas and replica state for a clean slate
+        self.presentation_mode = False
+        try:
+            self.banner_present.pack_forget()
+        except Exception:
+            pass
         self.board = BoardState(CANVAS_W, CANVAS_H)
         self.canvas.delete("all")
         self.tree_users.delete(*self.tree_users.get_children())
@@ -419,13 +426,12 @@ class WhiteboardApp:
 
         # Line Width Slider
         ttk.Label(parent, text="Stroke Width", font=("Helvetica", 10, "bold")).pack(anchor=tk.W)
+        self.lbl_width_val = ttk.Label(parent, text=f"Width: {self.current_width}px")
         self.slider_width = ttk.Scale(
             parent, from_=1, to=30, orient=tk.HORIZONTAL, command=self.on_change_width
         )
         self.slider_width.set(self.current_width)
         self.slider_width.pack(fill=tk.X, pady=2)
-
-        self.lbl_width_val = ttk.Label(parent, text=f"Width: {self.current_width}px")
         self.lbl_width_val.pack(anchor=tk.W)
 
         ttk.Separator(parent, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
@@ -495,6 +501,10 @@ class WhiteboardApp:
         self.menu_user_role.add_command(
             label="Make Viewer", command=lambda: self.on_set_user_role("viewer")
         )
+        self.menu_user_role.add_separator()
+        self.menu_user_role.add_command(
+            label="Kick User", command=self.on_kick_user
+        )
         self.tree_users.bind("<Button-2>", self.on_user_right_click)  # macOS
         self.tree_users.bind("<Button-3>", self.on_user_right_click)  # Windows / Linux
 
@@ -553,7 +563,8 @@ class WhiteboardApp:
     def on_change_width(self, val: str) -> None:
         """Updates line thickness from slider."""
         self.current_width = int(float(val))
-        self.lbl_width_val.config(text=f"Width: {self.current_width}px")
+        if hasattr(self, "lbl_width_val") and self.lbl_width_val is not None:
+            self.lbl_width_val.config(text=f"Width: {self.current_width}px")
 
     def on_click_undo(self) -> None:
         """Sends undo request to server."""
@@ -636,6 +647,42 @@ class WhiteboardApp:
         if self.net:
             self.net.send({"t": "setrole", "user": target_user, "role": new_role})
 
+    def on_kick_user(self) -> None:
+        """Kicks selected participant from the room (host only)."""
+        if self.my_role != "host":
+            return
+        selected = self.tree_users.selection()
+        if not selected:
+            return
+        target_user = selected[0]
+        if target_user == self.username:
+            messagebox.showwarning("Kick", "You cannot kick yourself.")
+            return
+        if messagebox.askyesno("Confirm Kick", f"Are you sure you want to kick '{target_user}' from the room?"):
+            if self.net:
+                self.net.send({"t": "kick", "user": target_user})
+
+    def on_toggle_present(self) -> None:
+        """Toggles presentation mode (host only)."""
+        if self.my_role != "host":
+            return
+        new_on = not self.presentation_mode
+        if self.net:
+            self.net.send({"t": "present", "on": new_on})
+
+    def _update_presentation_ui(self) -> None:
+        """Updates GUI presentation banner and tool states."""
+        if self.presentation_mode:
+            self.banner_present.pack(side=tk.TOP, fill=tk.X, before=self.canvas)
+            if self.my_role == "host":
+                self.btn_present.config(text="Present: ON")
+            else:
+                self.btn_present.config(text="Present: OFF")
+        else:
+            self.banner_present.pack_forget()
+            self.btn_present.config(text="Present: OFF")
+        self.update_role_permissions()
+
     def on_send_chat(self) -> None:
         """Sends chat text to server and clears entry field."""
         text = self.entry_chat.get().strip()
@@ -646,12 +693,12 @@ class WhiteboardApp:
         self.entry_chat.delete(0, tk.END)
 
     def update_role_permissions(self) -> None:
-        """Enables/disables GUI controls based on current member role."""
-        is_viewer = (self.my_role == "viewer")
+        """Enables/disables GUI controls based on current member role and presentation mode."""
         is_host = (self.my_role == "host")
+        is_view_only = (self.my_role == "viewer") or (self.presentation_mode and not is_host)
 
-        # Disable drawing controls if viewer
-        state_draw = tk.DISABLED if is_viewer else tk.NORMAL
+        # Disable drawing controls if viewer or presentation mode active
+        state_draw = tk.DISABLED if is_view_only else tk.NORMAL
         for btn in self.tool_buttons.values():
             btn.config(state=state_draw)
         self.slider_width.config(state=state_draw)
@@ -660,11 +707,18 @@ class WhiteboardApp:
 
         # Host-only controls
         self.btn_present.config(state=tk.NORMAL if is_host else tk.DISABLED)
-        self.btn_clear.config(state=tk.NORMAL if is_host else tk.DISABLED)
+        self.btn_clear.config(state=tk.NORMAL if (is_host and not self.presentation_mode) else tk.DISABLED)
         self.btn_save_ver.config(state=tk.NORMAL if is_host else tk.DISABLED)
         self.btn_load_ver.config(state=tk.NORMAL if is_host else tk.DISABLED)
 
-        role_str = "Viewer (View-Only)" if is_viewer else ("Host" if is_host else "Editor")
+        if self.presentation_mode and not is_host:
+            role_str = "Viewer (Presentation Mode)"
+        elif self.my_role == "viewer":
+            role_str = "Viewer (View-Only)"
+        elif is_host:
+            role_str = "Host"
+        else:
+            role_str = "Editor"
         self.lbl_status_role.config(text=f"Role: {role_str}")
 
     # =========================================================================
@@ -673,7 +727,7 @@ class WhiteboardApp:
 
     def on_canvas_press(self, event: tk.Event) -> None:
         """Handles initial mouse click to start drawing."""
-        if self.my_role == "viewer":
+        if self.my_role == "viewer" or (self.presentation_mode and self.my_role != "host"):
             return
 
         x, y = round(event.x), round(event.y)
@@ -724,7 +778,7 @@ class WhiteboardApp:
 
     def on_canvas_drag(self, event: tk.Event) -> None:
         """Handles mouse drag, rendering locally and streaming live 'part' fragments."""
-        if not self.is_drawing or self.my_role == "viewer":
+        if not self.is_drawing or self.my_role == "viewer" or (self.presentation_mode and self.my_role != "host"):
             return
 
         x, y = round(event.x), round(event.y)
@@ -1126,6 +1180,9 @@ class WhiteboardApp:
             messagebox.showinfo("Version Saved", f"Board version successfully saved:\n{filename}")
         elif t == "versions":
             self._handle_versions_list(msg)
+        elif t == "present":
+            self.presentation_mode = bool(msg.get("on", False))
+            self._update_presentation_ui()
         elif t == "pong":
             ts = msg.get("ts")
             if ts:
@@ -1176,7 +1233,8 @@ class WhiteboardApp:
 
         self.lbl_status_room.config(text=f"Room: {self.room_code}")
         self.lbl_status_seq.config(text=f"Seq: {self.board.seq}")
-        self.update_role_permissions()
+        self.presentation_mode = bool(msg.get("present", False))
+        self._update_presentation_ui()
 
     def _handle_op(self, op: Dict[str, Any]) -> None:
         """Applies sequenced server operation and triggers gap synchronization if needed."""
@@ -1305,6 +1363,7 @@ class WhiteboardApp:
             "room_full": "The room has reached maximum capacity (30 members).",
             "readonly": "Action denied: Viewers cannot draw or edit.",
             "denied": "Action denied: Only the room host can perform this operation.",
+            "kicked": "You were kicked from the room by the host.",
         }
         user_facing_msg = error_map.get(code, err_msg)
 
