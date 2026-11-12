@@ -1198,6 +1198,7 @@ class ClientSession:
                 if ok:
                     valid_s = dict(s)
                     valid_s.setdefault("id", f"s_{idx}_{secrets.token_hex(4)}")
+                    valid_s["h"] = False   # Always restore strokes as visible
                     valid_strokes.append(valid_s)
 
             # Replace strokes and broadcast a single sequenced reset op
