@@ -66,6 +66,7 @@ try:
     )
     from whiteboard.server import WhiteboardServer
     from whiteboard.boardstate import BoardState
+    from whiteboard.client import _load_saved_session_token, _save_session_token
     from whiteboard.netclient import Net
 except ImportError:
     from protocol import (  # type: ignore
@@ -82,7 +83,37 @@ except ImportError:
     )
     from server import WhiteboardServer  # type: ignore
     from boardstate import BoardState  # type: ignore
+    from client import _load_saved_session_token, _save_session_token  # type: ignore
     from netclient import Net  # type: ignore
+
+
+class TestSessionTokenPersistence(unittest.TestCase):
+    def test_session_token_survives_client_restart_and_is_identity_scoped(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="wb_test_tokens_") as token_dir:
+            _save_session_token(
+                "127.0.0.1",
+                5050,
+                "Alice",
+                "0123456789abcdef0123456789abcdef",
+                base_dir=token_dir,
+            )
+
+            self.assertEqual(
+                _load_saved_session_token(
+                    "127.0.0.1", 5050, "Alice", base_dir=token_dir
+                ),
+                "0123456789abcdef0123456789abcdef",
+            )
+            self.assertIsNone(
+                _load_saved_session_token(
+                    "127.0.0.1", 5050, "Bob", base_dir=token_dir
+                )
+            )
+            self.assertIsNone(
+                _load_saved_session_token(
+                    "192.168.1.2", 5050, "Alice", base_dir=token_dir
+                )
+            )
 
 
 class TestFraming(unittest.TestCase):
@@ -911,6 +942,22 @@ class TestServerIntegration(unittest.TestCase):
         welcome1 = self._recv_type(c1, "welcome")
         token = welcome1.get("you", {}).get("token")
 
+        c_observer = self._connect()
+        send_msg(
+            c_observer,
+            {
+                "t": "hello",
+                "room": "reconnect-room",
+                "user": "Bob",
+                "pw": "pass",
+                "create": False,
+            },
+        )
+        self._recv_type(c_observer, "welcome")
+        self._recv_type(c_observer, "users")
+        self._recv_type(c1, "users")
+        self.assertIn("Bob joined", self._recv_type(c1, "notice").get("msg", ""))
+
         # Draw 2 strokes
         for i in range(2):
             send_msg(
@@ -944,8 +991,11 @@ class TestServerIntegration(unittest.TestCase):
         err = self._recv_type(c_eve, "err")
         self.assertEqual(err.get("code"), "name_taken")
 
-        # Alice disconnects socket c1
-        c1.close()
+        # Alice leaves from the client UI
+        send_msg(c1, {"t": "leave"})
+        self._recv_type(c_observer, "users")
+        offline_notice = self._recv_type(c_observer, "notice")
+        self.assertIn("Alice went offline", offline_notice.get("msg", ""))
 
         # Alice reconnects with token and last_seq=1 (requesting missed delta ops)
         c_reconnect = self._connect()
@@ -962,11 +1012,48 @@ class TestServerIntegration(unittest.TestCase):
             },
         )
         welcome_reconnect = self._recv_type(c_reconnect, "welcome")
+        self.assertTrue(welcome_reconnect.get("reconnected"))
+        self._recv_type(c_observer, "users")
+        self.assertEqual(
+            self._recv_type(c_observer, "notice").get("msg"),
+            "Alice reconnected to the room",
+        )
+        self.assertEqual(
+            self.server.rooms["reconnect-room"].seen_usernames,
+            {"Alice", "Bob"},
+        )
         self.assertEqual(welcome_reconnect.get("mode"), "delta")
         # Should only contain op 2
         ops = welcome_reconnect.get("ops", [])
         self.assertEqual(len(ops), 1)
         self.assertEqual(ops[0].get("id"), "stroke_1")
+
+    def test_seen_username_history_survives_autosave(self) -> None:
+        client = self._connect()
+        send_msg(
+            client,
+            {
+                "t": "hello",
+                "room": "username-history-room",
+                "user": "Alice",
+                "pw": "pass",
+                "create": True,
+            },
+        )
+        self._recv_type(client, "welcome")
+
+        room = self.server.rooms["username-history-room"]
+        room.autosave()
+        self.assertIn("Alice", room.seen_usernames)
+        with self.server.rooms_lock:
+            del self.server.rooms["username-history-room"]
+
+        restored_room = self.server.get_or_create_room(
+            "username-history-room", "pass", create=False
+        )
+        if isinstance(restored_room, str):
+            self.fail(f"Room history restore failed: {restored_room}")
+        self.assertIn("Alice", restored_room.seen_usernames)
 
     def test_silent_client_marked_offline_by_reaper(self) -> None:
         """Verify reaper thread marks inactive clients offline after timeout."""

@@ -37,6 +37,8 @@ Key Architectural Principles:
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import math
 import os
 import queue
@@ -95,6 +97,86 @@ QUICK_PALETTE: list[str] = [
 ]
 
 
+def _session_token_file(
+    host: str,
+    port: int,
+    username: str,
+    base_dir: Optional[str] = None,
+) -> str:
+    if base_dir is None:
+        if os.name == "nt":
+            base_dir = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        elif sys.platform == "darwin":
+            base_dir = os.path.join(
+                os.path.expanduser("~"), "Library", "Application Support"
+            )
+        else:
+            base_dir = os.environ.get("XDG_STATE_HOME") or os.path.join(
+                os.path.expanduser("~"), ".local", "state"
+            )
+
+    identity = json.dumps([host, port, username], separators=(",", ":"))
+    identity_key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return os.path.join(
+        base_dir,
+        "LANCollaborativeWhiteboard",
+        "session_tokens",
+        f"{identity_key}.json",
+    )
+
+
+def _load_saved_session_token(
+    host: str,
+    port: int,
+    username: str,
+    base_dir: Optional[str] = None,
+) -> Optional[str]:
+    path = _session_token_file(host, port, username, base_dir)
+    try:
+        with open(path, "r", encoding="utf-8") as token_file:
+            data = json.load(token_file)
+    except FileNotFoundError:
+        return None
+
+    token = data.get("token") if isinstance(data, dict) else None
+    if token is None:
+        return None
+    if not isinstance(token, str) or len(token) != 32 or any(
+        char not in "0123456789abcdef" for char in token
+    ):
+        raise ValueError(f"Invalid saved session token in {path}")
+    return token
+
+
+def _save_session_token(
+    host: str,
+    port: int,
+    username: str,
+    token: str,
+    base_dir: Optional[str] = None,
+) -> None:
+    if len(token) != 32 or any(char not in "0123456789abcdef" for char in token):
+        raise ValueError("The server returned an invalid session token")
+
+    path = _session_token_file(host, port, username, base_dir)
+    directory = os.path.dirname(path)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    temp_path = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as token_file:
+            json.dump({"token": token}, token_file)
+        if os.name != "nt":
+            os.chmod(temp_path, 0o600)
+        os.replace(temp_path, path)
+    except OSError:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+        raise
+
+
 class WhiteboardApp:
     """Main Tkinter Collaborative Whiteboard GUI Application."""
 
@@ -118,6 +200,8 @@ class WhiteboardApp:
         self.login_is_host: bool = False
         self.host_code: str = ""
         self.session_token: Optional[str] = None
+        self._session_token_context: Optional[Tuple[str, int, str, str]] = None
+        self._connection_context: Optional[Tuple[str, int, str, str]] = None
         self._activity_join_logged: bool = False
         self.my_role: str = "editor"  # "host", "editor", "viewer"
         self.my_color: str = "#000000"
@@ -279,7 +363,24 @@ class WhiteboardApp:
         self.password = pw
         self.login_is_host = login_is_host
         self.host_code = host_code
-        self.session_token = None
+        connection_context = (host, port, user, pw)
+        self._connection_context = connection_context
+        if not (
+            self.session_token
+            and self._session_token_context == connection_context
+        ):
+            try:
+                self.session_token = _load_saved_session_token(host, port, user)
+            except (OSError, ValueError) as exc:
+                self.session_token = None
+                messagebox.showwarning(
+                    "Saved Session",
+                    f"Could not restore the saved session token:\n{exc}",
+                    parent=self.root,
+                )
+            self._session_token_context = (
+                connection_context if self.session_token else None
+            )
         self._activity_join_logged = False
         self.lbl_login_room.config(text="Room Code: connecting to server...")
 
@@ -296,7 +397,10 @@ class WhiteboardApp:
             }
             if self.login_is_host:
                 hello["host_code"] = self.host_code
-            if self.session_token:
+            if (
+                self.session_token
+                and self._session_token_context == connection_context
+            ):
                 hello["token"] = self.session_token
                 hello["last_seq"] = self.board.seq
             return hello
@@ -383,6 +487,12 @@ class WhiteboardApp:
             highlightthickness=1,
             highlightbackground="#CCCCCC",
         )
+        self.lbl_room_code_top = ttk.Label(
+            canvas_frame,
+            text="Room Code: --",
+            font=("Helvetica", 9, "bold"),
+        )
+        self.lbl_room_code_top.pack(side=tk.TOP, anchor=tk.W, padx=4, pady=(0, 2))
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
         # Canvas Mouse Event Bindings
@@ -1318,7 +1428,22 @@ class WhiteboardApp:
         """Processes server welcome payload, switching to main whiteboard."""
         self.room_code = str(msg.get("room", ""))
         self.lbl_login_room.config(text=f"Room Code: {self.room_code}")
-        self.session_token = msg.get("you", {}).get("token")
+        self.lbl_room_code_top.config(text=f"Room Code: {self.room_code}")
+        received_token = msg.get("you", {}).get("token")
+        self.session_token = received_token if isinstance(received_token, str) else None
+        self._session_token_context = (
+            self._connection_context if self.session_token else None
+        )
+        if self.session_token and self._connection_context:
+            host, port, username, _ = self._connection_context
+            try:
+                _save_session_token(host, port, username, self.session_token)
+            except (OSError, ValueError) as exc:
+                messagebox.showwarning(
+                    "Saved Session",
+                    f"Could not save the session token for future reconnects:\n{exc}",
+                    parent=self.root,
+                )
         self.my_role = msg.get("you", {}).get("role", "editor")
         self.my_color = msg.get("you", {}).get("color", "#000000")
         self.select_color(self.my_color)
@@ -1344,7 +1469,8 @@ class WhiteboardApp:
         self._handle_users_list(msg)
         if not self._activity_join_logged:
             role_text = "Host" if self.my_role == "host" else "Participant"
-            self._append_activity(f"You joined the room as {role_text}.")
+            action = "reconnected to" if msg.get("reconnected") else "joined"
+            self._append_activity(f"You {action} the room as {role_text}.")
             self._activity_join_logged = True
 
         # Populate chat history

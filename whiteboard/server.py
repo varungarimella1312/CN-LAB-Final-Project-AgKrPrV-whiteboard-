@@ -268,6 +268,7 @@ class Room:
         self.boards_dir = boards_dir
         self.host_user: str = ""
         self.members: Dict[str, Member] = {}
+        self.seen_usernames: set[str] = set()
         self.seq: int = 0
         self.log: List[Dict[str, Any]] = []
         self.strokes: OrderedDict[str, Dict[str, Any]] = OrderedDict()
@@ -387,6 +388,7 @@ class Room:
                 "salt": self.salt,
                 "password_hash": self.password_hash,
                 "host_user": self.host_user,
+                "seen_usernames": sorted(self.seen_usernames),
                 "seq": self.seq,
                 "log": self.log,
                 "strokes": list(self.strokes.values()),
@@ -681,11 +683,14 @@ class ClientSession:
                 self.close_graceful_and_exit()
                 return False
 
+            reconnected = username in room.seen_usernames
+
             # Check username collision / reconnection
             if username in room.members:
                 existing_member = room.members[username]
                 if token and hmac.compare_digest(existing_member.token, str(token)):
                     # Legitimate reconnect using secret token
+                    reconnected = True
                     if existing_member.session and existing_member.session != self:
                         # Close stale half-open socket
                         existing_member.session.close()
@@ -731,6 +736,10 @@ class ClientSession:
                 )
                 room.members[username] = member
 
+            if username not in room.seen_usernames:
+                room.seen_usernames.add(username)
+                room.dirty = True
+
             if is_startup_host:
                 previous_host = room.members.get(room.host_user)
                 if previous_host and previous_host.user != username:
@@ -764,6 +773,7 @@ class ClientSession:
                     "chat": room.chat_history_for(member),
                     "canvas": room.canvas,
                     "present": room.presentation_mode,
+                    "reconnected": reconnected,
                     "mode": mode,
                     "ops": room.log[last_seq:],
                 }
@@ -784,6 +794,7 @@ class ClientSession:
                     "chat": room.chat_history_for(member),
                     "canvas": room.canvas,
                     "present": room.presentation_mode,
+                    "reconnected": reconnected,
                     "mode": mode,
                     "strokes": list(room.strokes.values()),
                 }
@@ -797,7 +808,11 @@ class ClientSession:
             })
             room.broadcast({
                 "t": "notice",
-                "msg": f"{username} joined the room",
+                "msg": (
+                    f"{username} reconnected to the room"
+                    if reconnected
+                    else f"{username} joined the room"
+                ),
             }, exclude_user=username)
 
         return True
@@ -1723,6 +1738,13 @@ class WhiteboardServer:
                             boards_dir=self.boards_dir,
                         )
                         room.host_user = data.get("host_user", "")
+                        raw_seen_usernames = data.get("seen_usernames", [])
+                        if isinstance(raw_seen_usernames, list):
+                            room.seen_usernames = {
+                                username
+                                for username in raw_seen_usernames
+                                if isinstance(username, str)
+                            }
                         room.seq = data.get("seq", 0)
                         room.log = data.get("log", [])
                         raw_strokes = data.get("strokes", [])

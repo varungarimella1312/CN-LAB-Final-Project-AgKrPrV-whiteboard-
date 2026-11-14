@@ -70,7 +70,7 @@ TCP is a byte-stream protocol with no intrinsic application message boundaries. 
 | Type (`t`) | Direction | Key Fields | Description |
 |:---|:---:|:---|:---|
 | `hello` | $C \to S$ | `room?, user, pw, create?, is_host?, host_code?, token?, last_seq?` | Initial handshake; generated-room clients send host status and host code when applicable. |
-| `welcome` | $S \to C$ | `room, seq, host, you, users, chat, canvas, mode, strokes \| ops` | Confirms join; delivers full snapshot or delta ops. |
+| `welcome` | $S \to C$ | `room, seq, host, you, users, chat, canvas, mode, reconnected?, strokes \| ops` | Confirms join; delivers full snapshot or delta ops and identifies returning usernames. |
 | `stroke` | $C \to S$ | `id, s: {tool, color, width, pts, text?, bg?}` | Commits finished drawing element or sticky note. |
 | `ack` | $S \to C$ | `id, seq` | Unicast acknowledgment to stroke author. |
 | `op` | $S \to C$ | `seq, k: "stroke"\|"vis"\|"reset", u, ...` | Authoritative sequenced state change broadcast to all. |
@@ -200,4 +200,4 @@ python3 whiteboard/test_integration.py
 > **Answer**: Each client connection has a dedicated writer thread draining a bounded `queue.Queue(maxsize=5000)`. When broadcasting, the server uses `send_queue.put_nowait()`. If a client's queue fills up, the server catches `queue.Full` and immediately disconnects that client, preventing bufferbloat and protecting the server and other participants from degradation.
 
 ### Q10: How do reconnecting clients recover missed operations without redrawing the entire canvas?
-> **Answer**: Reconnecting clients submit their secret session token and their last known sequence number (`last_seq`) in their `hello` handshake. If `last_seq` is valid, the server replies with `mode: "delta"` containing only operations committed since that sequence (`room.log[last_seq:]`), allowing the client to catch up incrementally without requesting a full canvas snapshot.
+> **Answer**: Reconnecting clients submit their secret session token and their last known sequence number (`last_seq`) in their `hello` handshake. The client stores the token in the current OS user's application-data folder, keyed by server and username (never storing the room password), so the same user can reclaim the session after returning to login or restarting the client. The server also retains the room's username history and labels returning usernames as reconnected. If `last_seq` is valid, the server replies with `mode: "delta"` containing only operations committed since that sequence (`room.log[last_seq:]`), allowing the client to catch up incrementally without requesting a full canvas snapshot.
