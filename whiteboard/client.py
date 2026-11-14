@@ -14,7 +14,7 @@ Key Architectural Principles:
 1. Non-Blocking Event-Driven GUI:
    All socket operations (connect, send, receive, reconnect) execute exclusively
    on background threads managed by `Net`. The Tkinter main thread remains 100%
-   responsive at all times. It consumes messages via `root.after(30, self._pump_events)`
+   responsive at all times. It consumes messages via `root.after(15, self._pump_events)`
    from a thread-safe `queue.Queue`.
 2. Model-View-Controller (MVC) Pattern:
    - Model: `BoardState` (`boardstate.py`) manages strokes, sequence tracking,
@@ -224,6 +224,7 @@ class WhiteboardApp:
 
         # Ephemeral Peer Overlays tracking: peer_username -> last_seen_timestamp
         self.peer_cursor_times: Dict[str, float] = {}
+        self.peer_cursor_items: Dict[str, Tuple[int, int]] = {}
 
         # Build Login & Main View Containers
         self.main_container = ttk.Frame(self.root)
@@ -238,7 +239,7 @@ class WhiteboardApp:
 
         # Window protocols & background polling timer
         self.root.protocol("WM_DELETE_WINDOW", self.on_window_close)
-        self.root.after(30, self._pump_network_events)
+        self.root.after(15, self._pump_network_events)
         self.root.after(1000, self._reap_stale_cursors)
 
     # =========================================================================
@@ -1330,16 +1331,22 @@ class WhiteboardApp:
             return
 
         tag = f"cursor_{user}"
-        self.canvas.delete(tag)
-
-        # Draw small pointer circle and name label
         r = 4
-        self.canvas.create_oval(
-            x - r, y - r, x + r, y + r, fill=color, outline="white", width=1, tags=tag
-        )
-        self.canvas.create_text(
-            x + 8, y + 2, text=user, fill=color, font=("Helvetica", 8, "bold"), anchor=tk.W, tags=tag
-        )
+        item_ids = self.peer_cursor_items.get(user)
+        if item_ids is None:
+            cursor_dot = self.canvas.create_oval(
+                x - r, y - r, x + r, y + r, fill=color, outline="white", width=1, tags=tag
+            )
+            cursor_label = self.canvas.create_text(
+                x + 8, y + 2, text=user, fill=color, font=("Helvetica", 8, "bold"), anchor=tk.W, tags=tag
+            )
+            self.peer_cursor_items[user] = (cursor_dot, cursor_label)
+        else:
+            cursor_dot, cursor_label = item_ids
+            self.canvas.coords(cursor_dot, x - r, y - r, x + r, y + r)
+            self.canvas.itemconfig(cursor_dot, fill=color)
+            self.canvas.coords(cursor_label, x + 8, y + 2)
+            self.canvas.itemconfig(cursor_label, text=user, fill=color)
 
         self.peer_cursor_times[user] = time.time()
 
@@ -1350,6 +1357,7 @@ class WhiteboardApp:
             if now - last_seen > 3.0:
                 self.canvas.delete(f"cursor_{user}")
                 del self.peer_cursor_times[user]
+                self.peer_cursor_items.pop(user, None)
         self.root.after(1000, self._reap_stale_cursors)
 
     # =========================================================================
@@ -1357,12 +1365,19 @@ class WhiteboardApp:
     # =========================================================================
 
     def _pump_network_events(self) -> None:
-        """Main event polling loop scheduled via root.after(30)."""
+        """Main event polling loop scheduled via root.after(15)."""
+        pending_cursors: Dict[str, Dict[str, Any]] = {}
         while True:
             try:
                 ev_type, payload = self.events_queue.get_nowait()
             except queue.Empty:
                 break
+
+            if ev_type == "msg" and payload.get("t") == "cursor":
+                user = payload.get("u")
+                if user:
+                    pending_cursors[user] = payload
+                continue
 
             try:
                 if ev_type == "conn":
@@ -1379,7 +1394,13 @@ class WhiteboardApp:
             except Exception as exc:
                 print(f"[Client] Exception processing network event: {exc}", file=sys.stderr)
 
-        self.root.after(30, self._pump_network_events)
+        for cursor_msg in pending_cursors.values():
+            try:
+                self.render_peer_cursor(cursor_msg)
+            except Exception as exc:
+                print(f"[Client] Exception processing network event: {exc}", file=sys.stderr)
+
+        self.root.after(15, self._pump_network_events)
 
     def _dispatch_server_message(self, msg: Dict[str, Any]) -> None:
         """Handles framed protocol dictionaries received from the server."""

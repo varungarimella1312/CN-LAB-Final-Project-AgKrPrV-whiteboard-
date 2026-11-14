@@ -42,6 +42,7 @@ import threading
 import time
 import unittest
 from typing import Any, Callable, Dict, List, Optional
+from unittest.mock import Mock
 
 # Ensure imports work whether executed from repo root or inside whiteboard/
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -66,7 +67,11 @@ try:
     )
     from whiteboard.server import WhiteboardServer
     from whiteboard.boardstate import BoardState
-    from whiteboard.client import _load_saved_session_token, _save_session_token
+    from whiteboard.client import (
+        WhiteboardApp,
+        _load_saved_session_token,
+        _save_session_token,
+    )
     from whiteboard.netclient import Net
 except ImportError:
     from protocol import (  # type: ignore
@@ -83,7 +88,11 @@ except ImportError:
     )
     from server import WhiteboardServer  # type: ignore
     from boardstate import BoardState  # type: ignore
-    from client import _load_saved_session_token, _save_session_token  # type: ignore
+    from client import (  # type: ignore
+        WhiteboardApp,
+        _load_saved_session_token,
+        _save_session_token,
+    )
     from netclient import Net  # type: ignore
 
 
@@ -114,6 +123,44 @@ class TestSessionTokenPersistence(unittest.TestCase):
                     "192.168.1.2", 5050, "Alice", base_dir=token_dir
                 )
             )
+
+
+class TestClientLatencyOptimizations(unittest.TestCase):
+    def test_event_pump_coalesces_cursors_without_skipping_other_messages(self) -> None:
+        app = WhiteboardApp.__new__(WhiteboardApp)
+        app.events_queue = queue.Queue()
+        app.root = Mock()
+        app.render_peer_cursor = Mock()
+        app._dispatch_server_message = Mock()
+
+        old_cursor = {"t": "cursor", "u": "Peer", "x": 1, "y": 2}
+        latest_cursor = {"t": "cursor", "u": "Peer", "x": 3, "y": 4}
+        operation = {"t": "op", "seq": 1}
+        app.events_queue.put(("msg", old_cursor))
+        app.events_queue.put(("msg", operation))
+        app.events_queue.put(("msg", latest_cursor))
+
+        app._pump_network_events()
+
+        app.render_peer_cursor.assert_called_once_with(latest_cursor)
+        app._dispatch_server_message.assert_called_once_with(operation)
+        self.assertEqual(app.root.after.call_args.args[0], 15)
+
+    def test_peer_cursor_canvas_items_are_reused(self) -> None:
+        app = WhiteboardApp.__new__(WhiteboardApp)
+        app.username = "Local"
+        app.canvas = Mock()
+        app.canvas.create_oval.return_value = 1
+        app.canvas.create_text.return_value = 2
+        app.peer_cursor_items = {}
+        app.peer_cursor_times = {}
+
+        app.render_peer_cursor({"u": "Peer", "x": 10, "y": 20})
+        app.render_peer_cursor({"u": "Peer", "x": 30, "y": 40})
+
+        app.canvas.create_oval.assert_called_once()
+        app.canvas.create_text.assert_called_once()
+        self.assertEqual(app.canvas.coords.call_count, 2)
 
 
 class TestFraming(unittest.TestCase):

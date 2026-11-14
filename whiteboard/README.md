@@ -106,7 +106,7 @@ TCP is a byte-stream protocol with no intrinsic application message boundaries. 
 - **Main GUI Thread**: Owns Tkinter canvas and controls; never executes blocking socket calls.
 - **Net Client Receiver Thread**: Connects socket, sends dynamic `get_hello()`, reads frames, and pushes `("conn", "msg", "disc", "fail")` events to `events_queue`.
 - **Net Client Sender Thread**: Drains outbound queue and transmits keepalive pings every 4s.
-- **Event Pump**: Polled via `root.after(30, self._pump_network_events)` to process network events directly on the GUI thread.
+- **Event Pump**: Polled every 15 ms via `root.after(15, self._pump_network_events)` to process network events directly on the GUI thread. Redundant cursor updates are coalesced per participant.
 
 ---
 
@@ -179,7 +179,7 @@ python3 whiteboard/test_integration.py
 > **Answer**: TCP is a stream-oriented protocol (RFC 793) with no concept of message boundaries. The OS network stack may segment a single large message across multiple packets or coalesce multiple small messages into a single packet via Nagle's algorithm. Length-prefix framing prepends each payload with a fixed 4-byte big-endian integer denoting payload byte count, allowing the receiver to reliably delineate and reconstruct complete messages.
 
 ### Q3: How do you prevent the GUI from freezing during network calls?
-> **Answer**: All blocking socket operations (`connect`, `recv`, `sendall`) run on background worker threads managed by `Net`. The Tkinter GUI main thread communicates with the network layer via a thread-safe `queue.Queue`. The GUI polls this queue every 30 ms using `root.after()`, keeping window redrawing and user input responsive at all times.
+> **Answer**: All blocking socket operations (`connect`, `recv`, `sendall`) run on background worker threads managed by `Net`. The Tkinter GUI main thread communicates with the network layer via a thread-safe `queue.Queue`. The GUI polls this queue every 15 ms using `root.after()`, keeping window redrawing and user input responsive at all times.
 
 ### Q4: How does your architecture ensure all clients see the exact same drawing order?
 > **Answer**: We use an authoritative central server. Every drawing action is submitted to the server, which acquires the room's `RLock`, assigns a strictly monotonic sequence number (`seq`), records the op in the room log, and broadcasts the op to all online members. Every client applies operations strictly in sequence order, ensuring eventual consistency across all replicas.
