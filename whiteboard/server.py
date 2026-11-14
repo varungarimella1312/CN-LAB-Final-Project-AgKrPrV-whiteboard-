@@ -158,7 +158,7 @@ def validate_stroke_dict(s: Any) -> Tuple[bool, str]:
     Enforces:
     - tool in {'pen', 'eraser', 'line', 'rect', 'oval', 'text'}
     - color matches #rrggbb
-    - width is numeric between 1 and 60
+    - width is numeric between 1 and 60 (90 for erasers)
     - pts is a list of 1 to 8000 finite [x,y] coordinates with |v| < 10000
     - shapes ('line', 'rect', 'oval') keep only first and last point
     - text tool requires 'text' key with 1-300 characters
@@ -181,8 +181,9 @@ def validate_stroke_dict(s: Any) -> Tuple[bool, str]:
         return False, f"Invalid color '{color}'; must be a valid #rrggbb hex string"
 
     width = s.get("width")
-    if not isinstance(width, (int, float)) or not (1 <= width <= 60):
-        return False, f"Invalid width {width}; must be between 1 and 60"
+    max_width = 90 if tool == "eraser" else 60
+    if not isinstance(width, (int, float)) or not (1 <= width <= max_width):
+        return False, f"Invalid width {width}; must be between 1 and {max_width}"
 
     pts = s.get("pts")
     if not isinstance(pts, list) or not (1 <= len(pts) <= 8000):

@@ -613,6 +613,42 @@ class TestServerIntegration(unittest.TestCase):
         err3 = self._recv_type(c, "err")
         self.assertEqual(err3.get("code"), "bad_op")
 
+    def test_eraser_max_width_is_accepted(self) -> None:
+        c = self._connect()
+        send_msg(
+            c,
+            {
+                "t": "hello",
+                "room": "eraser-room",
+                "user": "EraserUser",
+                "pw": "p",
+                "create": True,
+            },
+        )
+        self._recv_type(c, "welcome")
+
+        send_msg(
+            c,
+            {
+                "t": "stroke",
+                "id": "eraser-max-width",
+                "s": {
+                    "tool": "eraser",
+                    "color": "#FFFFFF",
+                    "width": 90,
+                    "pts": [[0, 0], [10, 10]],
+                },
+            },
+        )
+
+        responses: Dict[str, Dict[str, Any]] = {}
+        while not {"ack", "op"}.issubset(responses):
+            msg = recv_msg(c)
+            if msg.get("t") in {"ack", "op"}:
+                responses[msg["t"]] = msg
+        op = responses["op"]
+        self.assertEqual(op.get("s", {}).get("width"), 90)
+
     def test_sticky_note_stroke_support(self) -> None:
         """Verify sticky note strokes with 'bg' color are validated, committed, and broadcast."""
         c = self._connect()
