@@ -115,7 +115,8 @@ class WhiteboardApp:
         self.room_code: str = ""
         self.username: str = ""
         self.password: str = ""
-        self.is_create: bool = False
+        self.login_is_host: bool = False
+        self.host_code: str = ""
         self.session_token: Optional[str] = None
         self.my_role: str = "editor"  # "host", "editor", "viewer"
         self.my_color: str = "#000000"
@@ -176,46 +177,80 @@ class WhiteboardApp:
         self.entry_port.insert(0, str(self.default_port))
         self.entry_port.grid(row=1, column=1, pady=6, padx=8)
 
-        # Room Code
-        ttk.Label(card, text="Room Code:").grid(row=2, column=0, sticky=tk.W, pady=6)
-        self.entry_room = ttk.Entry(card, width=28)
-        self.entry_room.insert(0, "main-room")
-        self.entry_room.grid(row=2, column=1, pady=6, padx=8)
+        # Select participant role
+        ttk.Label(card, text="Join as:").grid(row=2, column=0, sticky=tk.W, pady=6)
+        self.login_role_var = tk.StringVar(value="participant")
+        role_frame = ttk.Frame(card)
+        role_frame.grid(row=2, column=1, sticky=tk.W, pady=6, padx=8)
+        ttk.Radiobutton(
+            role_frame,
+            text="Host",
+            variable=self.login_role_var,
+            value="host",
+            command=self._update_login_role_fields,
+        ).pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Radiobutton(
+            role_frame,
+            text="Participant",
+            variable=self.login_role_var,
+            value="participant",
+            command=self._update_login_role_fields,
+        ).pack(side=tk.LEFT)
+
+        self.lbl_login_room = ttk.Label(
+            card, text="Room Code: displayed after connecting"
+        )
+        self.lbl_login_room.grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=6)
 
         # Username
-        ttk.Label(card, text="Your Name:").grid(row=3, column=0, sticky=tk.W, pady=6)
+        ttk.Label(card, text="Your Name:").grid(row=4, column=0, sticky=tk.W, pady=6)
         self.entry_user = ttk.Entry(card, width=28)
         self.entry_user.insert(0, f"User_{secrets.token_hex(2)}")
-        self.entry_user.grid(row=3, column=1, pady=6, padx=8)
+        self.entry_user.grid(row=4, column=1, pady=6, padx=8)
+
+        # Host code (shown only for the host role)
+        self.lbl_host_code = ttk.Label(card, text="Host Code:")
+        self.lbl_host_code.grid(row=5, column=0, sticky=tk.W, pady=6)
+        self.entry_host_code = ttk.Entry(card, width=28, show="*")
+        self.entry_host_code.grid(row=5, column=1, pady=6, padx=8)
 
         # Password
-        ttk.Label(card, text="Room Password:").grid(row=4, column=0, sticky=tk.W, pady=6)
+        ttk.Label(card, text="Room Password:").grid(row=6, column=0, sticky=tk.W, pady=6)
         self.entry_pass = ttk.Entry(card, width=28, show="*")
         self.entry_pass.insert(0, "")
-        self.entry_pass.grid(row=4, column=1, pady=6, padx=8)
-
-        # Create vs Join Checkbox
-        self.var_create = tk.BooleanVar(value=False)
-        self.chk_create = ttk.Checkbutton(
-            card, text="Create a new session (I am the host)", variable=self.var_create
-        )
-        self.chk_create.grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=10)
+        self.entry_pass.grid(row=6, column=1, pady=6, padx=8)
 
         # Connect Button & Status Message
         self.btn_connect = ttk.Button(card, text="Connect & Enter", command=self.on_click_connect)
-        self.btn_connect.grid(row=6, column=0, columnspan=2, pady=12, sticky=tk.EW)
+        self.btn_connect.grid(row=7, column=0, columnspan=2, pady=12, sticky=tk.EW)
 
         self.lbl_login_status = ttk.Label(card, text="", foreground="red")
-        self.lbl_login_status.grid(row=7, column=0, columnspan=2, pady=4)
+        self.lbl_login_status.grid(row=8, column=0, columnspan=2, pady=4)
+        ttk.Label(card, text="Use the room password printed in the server terminal.").grid(
+            row=9, column=0, columnspan=2, sticky=tk.W, pady=(4, 0)
+        )
+        ttk.Label(card, text="Host code is only needed when joining as the host.").grid(
+            row=10, column=0, columnspan=2, sticky=tk.W, pady=(2, 0)
+        )
+        self._update_login_role_fields()
+
+    def _update_login_role_fields(self) -> None:
+        """Shows the host verification field only when the host role is selected."""
+        if self.login_role_var.get() == "host":
+            self.lbl_host_code.grid()
+            self.entry_host_code.grid()
+        else:
+            self.lbl_host_code.grid_remove()
+            self.entry_host_code.grid_remove()
 
     def on_click_connect(self) -> None:
         """Validates login fields and initializes the Net background connection."""
         host = self.entry_host.get().strip()
         port_str = self.entry_port.get().strip()
-        room = self.entry_room.get().strip()
         user = self.entry_user.get().strip()
         pw = self.entry_pass.get()
-        create = self.var_create.get()
+        login_is_host = self.login_role_var.get() == "host"
+        host_code = self.entry_host_code.get().strip() if login_is_host else ""
 
         if not host:
             self.lbl_login_status.config(text="Server address is required")
@@ -226,19 +261,25 @@ class WhiteboardApp:
             self.lbl_login_status.config(text="Port must be a valid number")
             return
 
-        if not room or len(room) < 3:
-            self.lbl_login_status.config(text="Room code must be 3-32 characters")
-            return
-
         if not user or len(user) < 1:
             self.lbl_login_status.config(text="Username is required")
             return
 
-        self.room_code = room
+        if len(pw) != 4 or not pw.isdigit():
+            self.lbl_login_status.config(text="Room password must be the 4-digit code from the server")
+            return
+
+        if login_is_host and (len(host_code) != 4 or not host_code.isdigit()):
+            self.lbl_login_status.config(text="Host code must be the 4-digit code from the server")
+            return
+
+        self.room_code = ""
         self.username = user
         self.password = pw
-        self.is_create = create
+        self.login_is_host = login_is_host
+        self.host_code = host_code
         self.session_token = None
+        self.lbl_login_room.config(text="Room Code: connecting to server...")
 
         self.lbl_login_status.config(text="Connecting to server...", foreground="blue")
         self.btn_connect.config(state=tk.DISABLED)
@@ -247,11 +288,12 @@ class WhiteboardApp:
         def get_hello() -> Dict[str, Any]:
             hello = {
                 "t": "hello",
-                "room": self.room_code,
                 "user": self.username,
                 "pw": self.password,
-                "create": (self.is_create if self.session_token is None else False),
+                "is_host": self.login_is_host,
             }
+            if self.login_is_host:
+                hello["host_code"] = self.host_code
             if self.session_token:
                 hello["token"] = self.session_token
                 hello["last_seq"] = self.board.seq
@@ -295,6 +337,7 @@ class WhiteboardApp:
             self.lbl_login_status.config(text=error_message, foreground="red")
         else:
             self.lbl_login_status.config(text="")
+        self.lbl_login_room.config(text="Room Code: displayed after connecting")
 
     # =========================================================================
     # MAIN WHITEBOARD LAYOUT
@@ -473,7 +516,10 @@ class WhiteboardApp:
     def _build_sidebar(self, parent: ttk.Frame) -> None:
         """Constructs participants list and chat panel."""
         # Top Half: Participants Roster
-        ttk.Label(parent, text="Participants", font=("Helvetica", 10, "bold")).pack(anchor=tk.W)
+        self.lbl_participants = ttk.Label(
+            parent, text="Participants (0)", font=("Helvetica", 10, "bold")
+        )
+        self.lbl_participants.pack(anchor=tk.W)
 
         roster_frame = ttk.Frame(parent)
         roster_frame.pack(fill=tk.BOTH, expand=True, pady=(2, 8))
@@ -1208,6 +1254,8 @@ class WhiteboardApp:
 
     def _handle_welcome(self, msg: Dict[str, Any]) -> None:
         """Processes server welcome payload, switching to main whiteboard."""
+        self.room_code = str(msg.get("room", ""))
+        self.lbl_login_room.config(text=f"Room Code: {self.room_code}")
         self.session_token = msg.get("you", {}).get("token")
         self.my_role = msg.get("you", {}).get("role", "editor")
         self.my_color = msg.get("you", {}).get("color", "#000000")
@@ -1287,6 +1335,7 @@ class WhiteboardApp:
         """Updates the participants treeview."""
         users = msg.get("users", [])
         self.tree_users.delete(*self.tree_users.get_children())
+        self.lbl_participants.config(text=f"Participants ({len(users)})")
 
         for u in users:
             uname = u.get("user", "")
@@ -1375,9 +1424,10 @@ class WhiteboardApp:
         fatal = bool(msg.get("fatal", False))
 
         error_map = {
-            "room_exists": "Room already exists! Uncheck 'Create' to join existing.",
-            "no_room": "Room not found! Check 'Create' if you want to host.",
+            "room_exists": "Room already exists. Enter the configured room code to join.",
+            "no_room": "Room not found. Check the room code configured on the server.",
             "bad_password": "Incorrect room password. Please try again.",
+            "bad_host_code": "Incorrect host code. Only the host can use this code.",
             "name_taken": "Username is already taken by another participant.",
             "room_full": "The room has reached maximum capacity (30 members).",
             "readonly": "Action denied: Viewers cannot draw or edit.",

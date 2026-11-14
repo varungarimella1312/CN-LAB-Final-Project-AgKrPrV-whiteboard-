@@ -69,7 +69,7 @@ TCP is a byte-stream protocol with no intrinsic application message boundaries. 
 
 | Type (`t`) | Direction | Key Fields | Description |
 |:---|:---:|:---|:---|
-| `hello` | $C \to S$ | `room, user, pw, create, token?, last_seq?` | Initial handshake; must arrive within 10s. |
+| `hello` | $C \to S$ | `room?, user, pw, create?, is_host?, host_code?, token?, last_seq?` | Initial handshake; generated-room clients send host status and host code when applicable. |
 | `welcome` | $S \to C$ | `room, seq, host, you, users, chat, canvas, mode, strokes \| ops` | Confirms join; delivers full snapshot or delta ops. |
 | `stroke` | $C \to S$ | `id, s: {tool, color, width, pts, text?, bg?}` | Commits finished drawing element or sticky note. |
 | `ack` | $S \to C$ | `id, seq` | Unicast acknowledgment to stroke author. |
@@ -148,10 +148,14 @@ When a host saves a version, the state is written to `boards/<room>/<timestamp>_
 ```bash
 python3 whiteboard/server.py --host 0.0.0.0 --port 5050
 ```
-*The server automatically detects your outbound LAN IP via an unreachable UDP socket to `10.255.255.255` (no packets transmitted).*
+The server starts without terminal input and prints a unique four-digit room code, four-digit host code, and four-digit room password. Share the room password with participants; only the host should use the host code.
+
+The server automatically detects your outbound LAN IP via an unreachable UDP socket to `10.255.255.255` (no packets transmitted). The room code and password are displayed in the client after connection.
 
 ### Starting Clients
 ```bash
+# Select Host or Participant in the GUI. The host enters the host code
+# and room password; participants enter only the room password.
 # Connect to local machine:
 python3 whiteboard/client.py --host 127.0.0.1 --port 5050
 

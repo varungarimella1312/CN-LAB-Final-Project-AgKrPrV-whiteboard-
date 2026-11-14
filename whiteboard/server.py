@@ -571,12 +571,29 @@ class ClientSession:
 
     def _handle_hello(self, msg: Dict[str, Any]) -> bool:
         """Validates join credentials, initializes room membership, and sends welcome."""
-        room_name = msg.get("room", "")
+        startup_room = self.server.startup_room
+        requested_room = msg.get("room", "")
+        room_name = startup_room.name if startup_room else requested_room
         username = msg.get("user", "")
         password = str(msg.get("pw", ""))
         create = bool(msg.get("create", False))
+        is_startup_host = startup_room is not None and bool(msg.get("is_host", False))
         token = msg.get("token")
         last_seq = msg.get("last_seq")
+
+        if (
+            startup_room
+            and requested_room
+            and requested_room != startup_room.name
+        ):
+            self.send_msg({
+                "t": "err",
+                "code": "no_room",
+                "msg": "The requested room is not available on this server",
+                "fatal": True,
+            })
+            self.close_graceful_and_exit()
+            return False
 
         if not isinstance(room_name, str) or not RE_ROOM_CODE.match(room_name):
             self.send_msg({
@@ -598,7 +615,11 @@ class ClientSession:
             self.close_graceful_and_exit()
             return False
 
-        room = self.server.get_or_create_room(room_name, password, create)
+        room = (
+            startup_room
+            if startup_room is not None
+            else self.server.get_or_create_room(room_name, password, create)
+        )
         if isinstance(room, str):
             self.send_msg({
                 "t": "err",
@@ -610,6 +631,23 @@ class ClientSession:
             return False
 
         with room.lock:
+            if is_startup_host:
+                host_code = str(msg.get("host_code", ""))
+                host_code_hash = hashlib.sha256(
+                    (room.salt + host_code).encode("utf-8")
+                ).hexdigest()
+                if not hmac.compare_digest(
+                    self.server.startup_host_code_hash or "", host_code_hash
+                ):
+                    self.send_msg({
+                        "t": "err",
+                        "code": "bad_host_code",
+                        "msg": "Incorrect host code",
+                        "fatal": True,
+                    })
+                    self.close_graceful_and_exit()
+                    return False
+
             # Check room password
             salt = room.salt
             computed_hash = hashlib.sha256((salt + password).encode("utf-8")).hexdigest()
@@ -655,8 +693,11 @@ class ClientSession:
                     self.close_graceful_and_exit()
                     return False
 
-                role = "host" if len(room.members) == 0 else "editor"
-                if not room.host_user:
+                if startup_room is not None:
+                    role = "host" if is_startup_host else "editor"
+                else:
+                    role = "host" if not room.members else "editor"
+                if role == "host":
                     room.host_user = username
 
                 user_color = room.allocate_color()
@@ -669,6 +710,13 @@ class ClientSession:
                     session=self,
                 )
                 room.members[username] = member
+
+            if is_startup_host:
+                previous_host = room.members.get(room.host_user)
+                if previous_host and previous_host.user != username:
+                    previous_host.role = "editor"
+                member.role = "host"
+                room.host_user = username
 
             self.user = username
             self.room = room
@@ -1391,6 +1439,8 @@ class WhiteboardServer:
         self.server_sock: Optional[socket.socket] = None
         self.accept_thread: Optional[threading.Thread] = None
         self.reaper_thread: Optional[threading.Thread] = None
+        self.startup_room: Optional[Room] = None
+        self.startup_host_code_hash: Optional[str] = None
 
     def start(self) -> None:
         """Starts the TCP server and background reaper thread. Non-blocking."""
@@ -1539,6 +1589,40 @@ class WhiteboardServer:
         with self.clients_lock:
             self.clients.discard(session)
 
+    def generate_startup_codes(self) -> Tuple[str, str, str]:
+        """Creates a room and generates distinct room, host, and password codes."""
+        with self.rooms_lock:
+            while True:
+                room_code = f"{secrets.randbelow(9000) + 1000:04d}"
+                room_path = os.path.join(self.boards_dir, room_code)
+                if room_code not in self.rooms and not os.path.exists(room_path):
+                    break
+
+            generated_codes = {room_code}
+            while len(generated_codes) < 3:
+                generated_codes.add(f"{secrets.randbelow(9000) + 1000:04d}")
+
+            remaining_codes = list(generated_codes - {room_code})
+            host_code = secrets.choice(remaining_codes)
+            remaining_codes.remove(host_code)
+            password_code = remaining_codes[0]
+            salt = secrets.token_hex(16)
+            password_hash = hashlib.sha256(
+                (salt + password_code).encode("utf-8")
+            ).hexdigest()
+            room = Room(
+                name=room_code,
+                salt=salt,
+                password_hash=password_hash,
+                boards_dir=self.boards_dir,
+            )
+            self.rooms[room_code] = room
+            self.startup_room = room
+            self.startup_host_code_hash = hashlib.sha256(
+                (salt + host_code).encode("utf-8")
+            ).hexdigest()
+            return room_code, host_code, password_code
+
     def get_or_create_room(
         self, name: str, password: str, create: bool
     ) -> Room | str:
@@ -1632,6 +1716,7 @@ def main() -> None:
         timeout=args.timeout,
         grace=args.grace,
     )
+    room_code, host_code, password_code = server.generate_startup_codes()
     server.start()
 
     lan_ip = get_lan_ip()
@@ -1640,6 +1725,9 @@ def main() -> None:
     print("=" * 64)
     print(f"Local LAN IP Address   : {lan_ip}")
     print(f"Listening On Interface : {args.host}:{server.port}")
+    print(f"Room Code              : {room_code}")
+    print(f"Host Code              : {host_code}  (host only)")
+    print(f"Room Password          : {password_code}  (share with participants)")
     print("\nShare this LAN IP and Port with other computers on your network:")
     print(f"  python client.py --host {lan_ip} --port {server.port}")
     print("=" * 64)

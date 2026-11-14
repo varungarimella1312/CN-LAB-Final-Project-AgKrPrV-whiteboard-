@@ -230,6 +230,78 @@ class TestServerIntegration(unittest.TestCase):
         self.assertEqual(welcome.get("you", {}).get("role"), "host")
         self.assertTrue(len(welcome.get("you", {}).get("token", "")) > 0)
 
+    def test_generated_codes_gate_host_and_participant_room_access(self) -> None:
+        room_code, host_code, password_code = self.server.generate_startup_codes()
+        self.assertRegex(room_code, r"^\d{4}$")
+        self.assertRegex(host_code, r"^\d{4}$")
+        self.assertRegex(password_code, r"^\d{4}$")
+        self.assertEqual(len({room_code, host_code, password_code}), 3)
+
+        host = self._connect()
+        send_msg(
+            host,
+            {
+                "t": "hello",
+                "user": "HostUser",
+                "pw": password_code,
+                "is_host": True,
+                "host_code": host_code,
+            },
+        )
+        host_welcome = self._recv_type(host, "welcome")
+        self.assertEqual(host_welcome.get("you", {}).get("role"), "host")
+        self.assertEqual(host_welcome.get("room"), room_code)
+        self._recv_type(host, "users")
+
+        invalid_host = self._connect()
+        send_msg(
+            invalid_host,
+            {
+                "t": "hello",
+                "user": "InvalidHost",
+                "pw": password_code,
+                "is_host": True,
+                "host_code": "0000" if host_code != "0000" else "0001",
+            },
+        )
+        host_error = self._recv_type(invalid_host, "err")
+        self.assertEqual(host_error.get("code"), "bad_host_code")
+
+        wrong_password_client = self._connect()
+        send_msg(
+            wrong_password_client,
+            {
+                "t": "hello",
+                "user": "WrongPasswordUser",
+                "pw": "0000" if password_code != "0000" else "0001",
+                "is_host": False,
+            },
+        )
+        password_error = self._recv_type(wrong_password_client, "err")
+        self.assertEqual(password_error.get("code"), "bad_password")
+
+        participant = self._connect()
+        send_msg(
+            participant,
+            {
+                "t": "hello",
+                "user": "Participant",
+                "pw": password_code,
+                "is_host": False,
+            },
+        )
+        participant_welcome = self._recv_type(participant, "welcome")
+        self.assertEqual(participant_welcome.get("you", {}).get("role"), "editor")
+        self.assertEqual(
+            {user["user"] for user in participant_welcome.get("users", [])},
+            {"HostUser", "Participant"},
+        )
+        host_roster = self._recv_type(host, "users")
+        self.assertEqual(
+            {user["user"] for user in host_roster.get("users", [])},
+            {"HostUser", "Participant"},
+        )
+
     def test_create_existing_room_fails(self) -> None:
         c1 = self._connect()
         send_msg(
