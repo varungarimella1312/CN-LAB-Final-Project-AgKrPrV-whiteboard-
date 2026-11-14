@@ -118,6 +118,7 @@ class WhiteboardApp:
         self.login_is_host: bool = False
         self.host_code: str = ""
         self.session_token: Optional[str] = None
+        self._activity_join_logged: bool = False
         self.my_role: str = "editor"  # "host", "editor", "viewer"
         self.my_color: str = "#000000"
         self.presentation_mode: bool = False
@@ -279,6 +280,7 @@ class WhiteboardApp:
         self.login_is_host = login_is_host
         self.host_code = host_code
         self.session_token = None
+        self._activity_join_logged = False
         self.lbl_login_room.config(text="Room Code: connecting to server...")
 
         self.lbl_login_status.config(text="Connecting to server...", foreground="blue")
@@ -326,6 +328,10 @@ class WhiteboardApp:
         self.board = BoardState(CANVAS_W, CANVAS_H)
         self.canvas.delete("all")
         self.tree_users.delete(*self.tree_users.get_children())
+        self.lbl_active_users.config(text="Active Users (0)")
+        self.text_activity.config(state=tk.NORMAL)
+        self.text_activity.delete("1.0", tk.END)
+        self.text_activity.config(state=tk.DISABLED)
         self.text_chat.config(state=tk.NORMAL)
         self.text_chat.delete("1.0", tk.END)
         self.text_chat.config(state=tk.DISABLED)
@@ -356,7 +362,6 @@ class WhiteboardApp:
 
         # 2. Center Canvas Viewport with Scrollbars
         canvas_frame = ttk.Frame(top_body, padding=2)
-        canvas_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         self.banner_present = tk.Label(
             canvas_frame,
@@ -392,9 +397,12 @@ class WhiteboardApp:
         self.root.bind("<Command-y>", lambda e: self.on_click_redo())
 
         # 3. Right Sidebar (Participants & Chat)
-        sidebar = ttk.Frame(top_body, padding=6, width=280)
+        sidebar = ttk.Frame(top_body, padding=6, width=270)
+        sidebar.pack_propagate(False)
         sidebar.pack(side=tk.RIGHT, fill=tk.BOTH, padx=4, pady=4)
         self._build_sidebar(sidebar)
+
+        canvas_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         # 4. Bottom Status Bar
         self.status_bar = ttk.Frame(self.main_container, padding=4, relief=tk.SUNKEN)
@@ -514,25 +522,22 @@ class WhiteboardApp:
         self.btn_leave.pack(fill=tk.X, pady=(12, 2))
 
     def _build_sidebar(self, parent: ttk.Frame) -> None:
-        """Constructs participants list and chat panel."""
-        # Top Half: Participants Roster
-        self.lbl_participants = ttk.Label(
-            parent, text="Participants (0)", font=("Helvetica", 10, "bold")
+        """Constructs the active-user roster, activity log, and chat panel."""
+        self.lbl_active_users = ttk.Label(
+            parent, text="Active Users (0)", font=("Helvetica", 10, "bold")
         )
-        self.lbl_participants.pack(anchor=tk.W)
+        self.lbl_active_users.pack(anchor=tk.W)
 
         roster_frame = ttk.Frame(parent)
-        roster_frame.pack(fill=tk.BOTH, expand=True, pady=(2, 8))
+        roster_frame.pack(fill=tk.BOTH, expand=True, pady=(2, 6))
 
         self.tree_users = ttk.Treeview(
-            roster_frame, columns=("role", "status"), show="tree headings", selectmode="browse"
+            roster_frame, columns=("role",), show="tree headings", selectmode="browse"
         )
         self.tree_users.heading("#0", text="User")
         self.tree_users.heading("role", text="Role")
-        self.tree_users.heading("status", text="Status")
-        self.tree_users.column("#0", width=120)
-        self.tree_users.column("role", width=60)
-        self.tree_users.column("status", width=60)
+        self.tree_users.column("#0", width=150)
+        self.tree_users.column("role", width=85)
         self.tree_users.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         user_scroll = ttk.Scrollbar(roster_frame, orient=tk.VERTICAL, command=self.tree_users.yview)
@@ -556,6 +561,32 @@ class WhiteboardApp:
 
         ttk.Separator(parent, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=4)
 
+        ttk.Label(parent, text="Recent Activity", font=("Helvetica", 10, "bold")).pack(
+            anchor=tk.W
+        )
+        activity_frame = ttk.Frame(parent)
+        activity_frame.pack(fill=tk.X, pady=(2, 6))
+
+        self.text_activity = tk.Text(
+            activity_frame,
+            wrap=tk.WORD,
+            width=30,
+            height=5,
+            state=tk.DISABLED,
+            bg="#FFFFFF",
+            fg="#1A202C",
+            font=("Helvetica", 9),
+        )
+        self.text_activity.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        activity_scroll = ttk.Scrollbar(
+            activity_frame, orient=tk.VERTICAL, command=self.text_activity.yview
+        )
+        self.text_activity.configure(yscrollcommand=activity_scroll.set)
+        activity_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        ttk.Separator(parent, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=4)
+
         # Bottom Half: Group Chat
         ttk.Label(parent, text="Group Chat", font=("Helvetica", 10, "bold")).pack(anchor=tk.W)
 
@@ -565,6 +596,7 @@ class WhiteboardApp:
         self.text_chat = tk.Text(
             chat_frame,
             wrap=tk.WORD,
+            width=30,
             height=14,
             state=tk.DISABLED,
             bg="#FFFFFF",
@@ -1232,8 +1264,12 @@ class WhiteboardApp:
         elif t == "chat":
             self._handle_chat_message(msg)
         elif t == "notice":
-            notice_text = msg.get("msg", "")
+            notice_text = str(msg.get("msg", ""))
             self.lbl_status_conn.config(text=f"Notice: {notice_text}")
+            activity_text = notice_text
+            if activity_text.endswith(" went offline"):
+                activity_text = f"{activity_text[:-len(' went offline')]} left the room"
+            self._append_activity(activity_text)
         elif t == "saved":
             filename = msg.get("file", "")
             messagebox.showinfo("Version Saved", f"Board version successfully saved:\n{filename}")
@@ -1280,6 +1316,10 @@ class WhiteboardApp:
 
         # Populate users roster
         self._handle_users_list(msg)
+        if not self._activity_join_logged:
+            role_text = "Host" if self.my_role == "host" else "Participant"
+            self._append_activity(f"You joined the room as {role_text}.")
+            self._activity_join_logged = True
 
         # Populate chat history
         self.text_chat.config(state=tk.NORMAL)
@@ -1334,26 +1374,41 @@ class WhiteboardApp:
     def _handle_users_list(self, msg: Dict[str, Any]) -> None:
         """Updates the participants treeview."""
         users = msg.get("users", [])
+        active_users = [user for user in users if user.get("online", True)]
         self.tree_users.delete(*self.tree_users.get_children())
-        self.lbl_participants.config(text=f"Participants ({len(users)})")
+        self.lbl_active_users.config(text=f"Active Users ({len(active_users)})")
 
-        for u in users:
+        for u in active_users:
             uname = u.get("user", "")
             role = u.get("role", "editor")
-            online = u.get("online", True)
-            status_text = "Online" if online else "Offline"
-            role_text = role.capitalize()
-            if role == "host":
-                role_text = "Host ★"
+            role_text = (
+                "Host"
+                if role == "host"
+                else "Viewer"
+                if role == "viewer"
+                else "Participant"
+            )
+            display_name = f"{uname} (you)" if uname == self.username else uname
 
             self.tree_users.insert(
-                "", tk.END, iid=uname, text=uname, values=(role_text, status_text)
+                "", tk.END, iid=uname, text=display_name, values=(role_text,)
             )
 
             # If our own role changed, update permissions
             if uname == self.username and role != self.my_role:
                 self.my_role = role
                 self.update_role_permissions()
+
+    def _append_activity(self, message: str) -> None:
+        """Adds a join, leave, or role event to the bounded activity log."""
+        self.text_activity.config(state=tk.NORMAL)
+        timestamp = time.strftime("%H:%M:%S")
+        self.text_activity.insert(tk.END, f"[{timestamp}] {message}\n")
+        line_count = int(self.text_activity.index("end-1c").split(".")[0])
+        if line_count > 51:
+            self.text_activity.delete("1.0", f"{line_count - 51}.0")
+        self.text_activity.config(state=tk.DISABLED)
+        self.text_activity.see(tk.END)
 
     def _handle_chat_message(self, msg: Dict[str, Any]) -> None:
         """Appends incoming chat message to display widget."""

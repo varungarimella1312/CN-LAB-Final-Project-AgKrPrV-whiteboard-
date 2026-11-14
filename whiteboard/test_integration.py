@@ -301,6 +301,19 @@ class TestServerIntegration(unittest.TestCase):
             {user["user"] for user in host_roster.get("users", [])},
             {"HostUser", "Participant"},
         )
+        join_notice = self._recv_type(host, "notice")
+        self.assertIn("Participant joined the room", join_notice.get("msg", ""))
+
+        participant.close()
+        leave_roster = self._recv_type(host, "users")
+        self.assertTrue(
+            any(
+                user.get("user") == "Participant" and not user.get("online")
+                for user in leave_roster.get("users", [])
+            )
+        )
+        leave_notice = self._recv_type(host, "notice")
+        self.assertIn("Participant went offline", leave_notice.get("msg", ""))
 
     def test_create_existing_room_fails(self) -> None:
         c1 = self._connect()
