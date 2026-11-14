@@ -1071,6 +1071,138 @@ class TestServerIntegration(unittest.TestCase):
         self.assertEqual(chat_list[-1]["text"], "Hello Networks Lab!")
         self.assertEqual(chat_list[-1]["user"], "Alice")
 
+    def test_group_and_private_chat_delivery_and_history(self) -> None:
+        alice = self._connect()
+        send_msg(
+            alice,
+            {
+                "t": "hello",
+                "room": "mixed-chat-room",
+                "user": "Alice",
+                "pw": "pw",
+                "create": True,
+            },
+        )
+        self._recv_type(alice, "welcome")
+        self._recv_type(alice, "users")
+
+        bob = self._connect()
+        send_msg(
+            bob,
+            {
+                "t": "hello",
+                "room": "mixed-chat-room",
+                "user": "Bob",
+                "pw": "pw",
+                "create": False,
+            },
+        )
+        bob_welcome = self._recv_type(bob, "welcome")
+        self._recv_type(bob, "users")
+        self._recv_type(alice, "users")
+        self._recv_type(alice, "notice")
+
+        carol = self._connect()
+        send_msg(
+            carol,
+            {
+                "t": "hello",
+                "room": "mixed-chat-room",
+                "user": "Carol",
+                "pw": "pw",
+                "create": False,
+            },
+        )
+        carol_welcome = self._recv_type(carol, "welcome")
+        self._recv_type(carol, "users")
+        for existing_client in (alice, bob):
+            self._recv_type(existing_client, "users")
+            self._recv_type(existing_client, "notice")
+
+        send_msg(alice, {"t": "chat", "text": "Hello everyone"})
+        group_messages = [
+            self._recv_type(client, "chat") for client in (alice, bob, carol)
+        ]
+        self.assertTrue(all(message.get("text") == "Hello everyone" for message in group_messages))
+        self.assertTrue(all(message.get("user") == "Alice" for message in group_messages))
+        self.assertTrue(all("to" not in message for message in group_messages))
+        self.assertTrue(all(isinstance(message.get("ts"), (int, float)) for message in group_messages))
+
+        send_msg(
+            alice,
+            {"t": "chat", "to": "Bob", "text": "Private message"},
+        )
+        alice_private = self._recv_type(alice, "chat")
+        bob_private = self._recv_type(bob, "chat")
+        self.assertEqual(alice_private.get("id"), bob_private.get("id"))
+        self.assertEqual(alice_private.get("user"), "Alice")
+        self.assertEqual(alice_private.get("to"), "Bob")
+        self.assertEqual(alice_private.get("text"), "Private message")
+        self.assertIsInstance(alice_private.get("ts"), (int, float))
+
+        send_msg(
+            alice,
+            {"t": "chat", "to": "NotActive", "text": "Should not be delivered"},
+        )
+        unavailable_error = self._recv_type(alice, "err")
+        self.assertEqual(unavailable_error.get("code"), "chat_recipient_unavailable")
+
+        carol.settimeout(0.2)
+        try:
+            unexpected_message = recv_msg(carol)
+        except socket.timeout:
+            pass
+        else:
+            self.fail(f"Private message leaked to another participant: {unexpected_message}")
+        finally:
+            carol.settimeout(3.0)
+
+        bob_token = bob_welcome.get("you", {}).get("token")
+        bob.close()
+        bob_reconnected = self._connect()
+        send_msg(
+            bob_reconnected,
+            {
+                "t": "hello",
+                "room": "mixed-chat-room",
+                "user": "Bob",
+                "pw": "pw",
+                "create": False,
+                "token": bob_token,
+                "last_seq": 0,
+            },
+        )
+        bob_reconnected_welcome = self._recv_type(bob_reconnected, "welcome")
+        bob_history = bob_reconnected_welcome.get("chat", [])
+        self.assertEqual(
+            [message.get("text") for message in bob_history],
+            ["Hello everyone", "Private message"],
+        )
+        self.assertNotIn("from_identity", bob_history[-1])
+        self.assertNotIn("to_identity", bob_history[-1])
+
+        carol_token = carol_welcome.get("you", {}).get("token")
+        carol.close()
+        carol_reconnected = self._connect()
+        send_msg(
+            carol_reconnected,
+            {
+                "t": "hello",
+                "room": "mixed-chat-room",
+                "user": "Carol",
+                "pw": "pw",
+                "create": False,
+                "token": carol_token,
+                "last_seq": 0,
+            },
+        )
+        carol_reconnected_welcome = self._recv_type(carol_reconnected, "welcome")
+        carol_history = carol_reconnected_welcome.get("chat", [])
+        self.assertEqual(
+            [message.get("text") for message in carol_history],
+            ["Hello everyone"],
+        )
+
     def test_save_list_restore_and_traversal_refused(self) -> None:
         """Verify saving version snapshots, listing versions, path traversal protection, and restoring."""
         c = self._connect()

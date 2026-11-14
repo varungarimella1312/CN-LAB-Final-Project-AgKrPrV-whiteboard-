@@ -212,12 +212,12 @@ class WhiteboardApp:
         # Host code (shown only for the host role)
         self.lbl_host_code = ttk.Label(card, text="Host Code:")
         self.lbl_host_code.grid(row=5, column=0, sticky=tk.W, pady=6)
-        self.entry_host_code = ttk.Entry(card, width=28, show="*")
+        self.entry_host_code = ttk.Entry(card, width=28)
         self.entry_host_code.grid(row=5, column=1, pady=6, padx=8)
 
         # Password
         ttk.Label(card, text="Room Password:").grid(row=6, column=0, sticky=tk.W, pady=6)
-        self.entry_pass = ttk.Entry(card, width=28, show="*")
+        self.entry_pass = ttk.Entry(card, width=28)
         self.entry_pass.insert(0, "")
         self.entry_pass.grid(row=6, column=1, pady=6, padx=8)
 
@@ -329,6 +329,8 @@ class WhiteboardApp:
         self.canvas.delete("all")
         self.tree_users.delete(*self.tree_users.get_children())
         self.lbl_active_users.config(text="Active Users (0)")
+        self.chat_recipient_var.set("Everyone")
+        self.chat_recipient_combo.configure(values=("Everyone",))
         self.text_activity.config(state=tk.NORMAL)
         self.text_activity.delete("1.0", tk.END)
         self.text_activity.config(state=tk.DISABLED)
@@ -587,17 +589,24 @@ class WhiteboardApp:
 
         ttk.Separator(parent, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=4)
 
-        # Bottom Half: Group Chat
-        ttk.Label(parent, text="Group Chat", font=("Helvetica", 10, "bold")).pack(anchor=tk.W)
+        # Bottom Half: Group and Private Chat
+        chat_panel = ttk.Frame(parent)
+        chat_panel.pack(fill=tk.BOTH, expand=True, pady=2)
+        chat_panel.columnconfigure(0, weight=1)
+        chat_panel.rowconfigure(1, weight=1)
 
-        chat_frame = ttk.Frame(parent)
-        chat_frame.pack(fill=tk.BOTH, expand=True, pady=2)
+        ttk.Label(chat_panel, text="Chat", font=("Helvetica", 10, "bold")).grid(
+            row=0, column=0, sticky=tk.W
+        )
+
+        chat_frame = ttk.Frame(chat_panel)
+        chat_frame.grid(row=1, column=0, sticky=tk.NSEW, pady=(2, 0))
 
         self.text_chat = tk.Text(
             chat_frame,
             wrap=tk.WORD,
             width=30,
-            height=14,
+            height=6,
             state=tk.DISABLED,
             bg="#FFFFFF",
             fg="#1A202C",
@@ -614,9 +623,22 @@ class WhiteboardApp:
         self.text_chat.configure(yscrollcommand=chat_scroll.set)
         chat_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
+        recipient_frame = ttk.Frame(chat_panel)
+        recipient_frame.grid(row=2, column=0, sticky=tk.EW, pady=(4, 0))
+        ttk.Label(recipient_frame, text="To:").pack(side=tk.LEFT, padx=(0, 4))
+        self.chat_recipient_var = tk.StringVar(value="Everyone")
+        self.chat_recipient_combo = ttk.Combobox(
+            recipient_frame,
+            textvariable=self.chat_recipient_var,
+            values=("Everyone",),
+            state="readonly",
+            width=18,
+        )
+        self.chat_recipient_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
         # Chat Entry & Send
-        send_frame = ttk.Frame(parent)
-        send_frame.pack(fill=tk.X, pady=4)
+        send_frame = ttk.Frame(chat_panel)
+        send_frame.grid(row=3, column=0, sticky=tk.EW, pady=4)
 
         self.entry_chat = ttk.Entry(send_frame)
         self.entry_chat.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
@@ -778,8 +800,12 @@ class WhiteboardApp:
         text = self.entry_chat.get().strip()
         if not text:
             return "break"
+        chat_message: Dict[str, Any] = {"t": "chat", "text": text}
+        recipient = self.chat_recipient_var.get()
+        if recipient.startswith("@"):
+            chat_message["to"] = recipient[1:]
         if self.net:
-            self.net.send({"t": "chat", "text": text})
+            self.net.send(chat_message)
         self.entry_chat.delete(0, tk.END)
         return "break"
 
@@ -1399,6 +1425,15 @@ class WhiteboardApp:
                 self.my_role = role
                 self.update_role_permissions()
 
+        recipients = ["Everyone"] + [
+            f"@{user.get('user', '')}"
+            for user in active_users
+            if user.get("user") and user.get("user") != self.username
+        ]
+        self.chat_recipient_combo.configure(values=recipients)
+        if self.chat_recipient_var.get() not in recipients:
+            self.chat_recipient_var.set("Everyone")
+
     def _append_activity(self, message: str) -> None:
         """Adds a join, leave, or role event to the bounded activity log."""
         self.text_activity.config(state=tk.NORMAL)
@@ -1423,13 +1458,15 @@ class WhiteboardApp:
         user = chat_item.get("user", chat_item.get("u", "User"))
         text = chat_item.get("text", "")
         color = chat_item.get("color", "#2B6CB0")
+        recipient = chat_item.get("to")
 
         # Dynamic user tag with their allocated palette color
         user_tag = f"user_{user}"
         self.text_chat.tag_configure(user_tag, foreground=color, font=("Helvetica", 9, "bold"))
 
         self.text_chat.insert(tk.END, f"[{t_str}] ", "time")
-        self.text_chat.insert(tk.END, f"{user}: ", user_tag)
+        message_author = f"{user} [private to {recipient}]" if recipient else user
+        self.text_chat.insert(tk.END, f"{message_author}: ", user_tag)
         self.text_chat.insert(tk.END, f"{text}\n", "msg")
         self.text_chat.see(tk.END)
 
@@ -1483,6 +1520,8 @@ class WhiteboardApp:
             "no_room": "Room not found. Check the room code configured on the server.",
             "bad_password": "Incorrect room password. Please try again.",
             "bad_host_code": "Incorrect host code. Only the host can use this code.",
+            "chat_recipient_unavailable": "That participant is no longer active.",
+            "chat_self_message": "You cannot send a private message to yourself.",
             "name_taken": "Username is already taken by another participant.",
             "room_full": "The room has reached maximum capacity (30 members).",
             "readonly": "Action denied: Viewers cannot draw or edit.",

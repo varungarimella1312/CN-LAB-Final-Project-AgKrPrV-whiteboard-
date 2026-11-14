@@ -79,7 +79,7 @@ TCP is a byte-stream protocol with no intrinsic application message boundaries. 
 | `undo` / `redo` | $C \to S$ | *(none)* | Reverts/restores caller's last drawing action. |
 | `clear` | $C \to S$ | *(none)* | Hides all canvas strokes (Host only). |
 | `sync` | $C \to S$ | `last_seq` | Requests missing ops on sequence gap detection. |
-| `chat` | $C \rightleftharpoons S$ | `id?, user?, text, ts?` | Text message broadcast with server timestamp. |
+| `chat` | $C \rightleftharpoons S$ | `id?, user, to?, text, ts` | Group messages are broadcast to the room; private messages are delivered only to the sender and the selected active participant. Both use server timestamps and appear in chronological history. |
 | `save` | $C \to S$ | `label` | Atomically writes version snapshot to disk (Host only). |
 | `versions` | $C \to S$ | *(none)* | Queries list of saved version files. |
 | `load` | $C \to S$ | `file` | Restores canvas from version file (Host only). |

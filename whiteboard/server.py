@@ -232,6 +232,7 @@ class Member:
         self.role = role  # "host", "editor", or "viewer"
         self.color = color
         self.token = token
+        self.identity_id = secrets.token_hex(16)
         self.session = session
         self.online = True
         self.joined_at: float = time.time()
@@ -272,6 +273,7 @@ class Room:
         self.strokes: OrderedDict[str, Dict[str, Any]] = OrderedDict()
         self.seen: Dict[str, int] = {}  # stroke_id -> committed sequence number (idempotence)
         self.chat_history: List[Dict[str, Any]] = []
+        self.private_chat_history: List[Dict[str, Any]] = []
         self.canvas: Dict[str, int] = {"w": CANVAS_W, "h": CANVAS_H}
         self.presentation_mode: bool = False
 
@@ -292,6 +294,23 @@ class Room:
             if color not in used_colors:
                 return color
         return MEMBER_PALETTE[len(self.members) % len(MEMBER_PALETTE)]
+
+    def chat_history_for(self, member: Member) -> List[Dict[str, Any]]:
+        """Returns chronological group and user-specific private message history."""
+        with self.lock:
+            messages = [dict(item) for item in self.chat_history]
+            messages.extend(
+                {
+                    key: value
+                    for key, value in item.items()
+                    if key not in {"from_identity", "to_identity"}
+                }
+                for item in self.private_chat_history
+                if item.get("from_identity") == member.identity_id
+                or item.get("to_identity") == member.identity_id
+            )
+            messages.sort(key=lambda item: float(item.get("ts", 0.0)))
+            return messages[-WELCOME_CHAT_HISTORY:]
 
     def commit(self, op: Dict[str, Any]) -> None:
         """Applies a state-altering operation under lock, assigns sequence number, and broadcasts.
@@ -372,6 +391,7 @@ class Room:
                 "log": self.log,
                 "strokes": list(self.strokes.values()),
                 "chat_history": self.chat_history,
+                "private_chat_history": self.private_chat_history,
                 "canvas": self.canvas,
             }
             try:
@@ -741,7 +761,7 @@ class ClientSession:
                         "token": member.token,
                     },
                     "users": [m.to_dict() for m in room.members.values()],
-                    "chat": room.chat_history[-WELCOME_CHAT_HISTORY:],
+                    "chat": room.chat_history_for(member),
                     "canvas": room.canvas,
                     "present": room.presentation_mode,
                     "mode": mode,
@@ -761,7 +781,7 @@ class ClientSession:
                         "token": member.token,
                     },
                     "users": [m.to_dict() for m in room.members.values()],
-                    "chat": room.chat_history[-WELCOME_CHAT_HISTORY:],
+                    "chat": room.chat_history_for(member),
                     "canvas": room.canvas,
                     "present": room.presentation_mode,
                     "mode": mode,
@@ -1094,13 +1114,14 @@ class ClientSession:
             })
 
     def _handle_chat(self, member: Member, msg: Dict[str, Any]) -> None:
-        """Records and broadcasts a chat message with server timestamp."""
+        """Routes group messages to the room and private messages to their recipient."""
         text = msg.get("text", "")
         if not isinstance(text, str) or not text.strip():
             return
 
         assert self.room is not None
         clean_text = text.strip()[:500]
+        recipient_name = msg.get("to")
         chat_item = {
             "id": secrets.token_hex(8),
             "user": member.user,
@@ -1108,10 +1129,54 @@ class ClientSession:
             "text": clean_text,
             "ts": time.time(),
         }
+
+        if recipient_name is not None:
+            if not isinstance(recipient_name, str) or not recipient_name:
+                self.send_msg({
+                    "t": "err",
+                    "code": "chat_recipient_unavailable",
+                    "msg": "That participant is no longer active",
+                    "fatal": False,
+                })
+                return
+            if recipient_name == member.user:
+                self.send_msg({
+                    "t": "err",
+                    "code": "chat_self_message",
+                    "msg": "You cannot send a private message to yourself",
+                    "fatal": False,
+                })
+                return
+
+            recipient = self.room.members.get(recipient_name)
+            if not recipient or not recipient.online or not recipient.session:
+                self.send_msg({
+                    "t": "err",
+                    "code": "chat_recipient_unavailable",
+                    "msg": "That participant is no longer active",
+                    "fatal": False,
+                })
+                return
+
+            chat_item["to"] = recipient_name
+            private_history_item = {
+                **chat_item,
+                "from_identity": member.identity_id,
+                "to_identity": recipient.identity_id,
+            }
+            self.room.private_chat_history.append(private_history_item)
+            if len(self.room.private_chat_history) > MAX_CHAT_HISTORY:
+                self.room.private_chat_history.pop(0)
+            self.room.dirty = True
+            private_message = {"t": "chat", **chat_item}
+            self.send_msg(private_message)
+            recipient.session.send_msg(private_message)
+            return
+
         self.room.chat_history.append(chat_item)
         if len(self.room.chat_history) > MAX_CHAT_HISTORY:
             self.room.chat_history.pop(0)
-
+        self.room.dirty = True
         self.room.broadcast({"t": "chat", **chat_item})
 
     def _handle_save(self, member: Member, msg: Dict[str, Any]) -> None:
@@ -1666,6 +1731,7 @@ class WhiteboardServer:
                             for i, s in enumerate(raw_strokes)
                         )
                         room.chat_history = data.get("chat_history", [])
+                        room.private_chat_history = data.get("private_chat_history", [])
                         room.canvas = data.get("canvas", {"w": CANVAS_W, "h": CANVAS_H})
                         self.rooms[name] = room
                         return room
