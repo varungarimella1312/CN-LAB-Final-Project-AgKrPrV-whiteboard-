@@ -1,203 +1,237 @@
-# LAN-Based Multi-User Collaborative Whiteboard
+# LAN Collaborative Whiteboard
 
-**Computer Networks Lab Project**  
-*Pure Python 3.10+ Standard Library Implementation (Zero External Dependencies)*
+A real-time, multi-user whiteboard for computers on the same local area network. The application uses a Python TCP server as the authority for shared board state and a Tkinter desktop client for each participant.
 
----
+The project is implemented with the Python standard library. It does not need a web server, third-party Python packages, or an internet connection to run. The client does require a Python installation that includes Tkinter.
 
-## 1. Project Overview & Architecture
+## Features
 
-This project is a high-performance, real-time collaborative whiteboard designed for local area networks (LANs). It operates **completely offline** with no internet connection, external web frameworks, or third-party packages.
+- Shared 1200 x 700 canvas with pen, white-stroke eraser, line, rectangle, oval, text, and sticky-note tools.
+- Adjustable stroke width, quick color palette, and native color picker.
+- Live drawing previews, participant cursors, and group or private chat.
+- Host, editor, and viewer roles. The host can also enable presentation mode, clear the board, manage participants, and save or load board versions.
+- Per-user undo and redo. The host can undo and redo a canvas clear.
+- Automatic reconnect attempts and board-state synchronization after a network interruption.
+- Server-side autosaves and labeled version snapshots.
 
-```
-                    +------------------------------------+
-                    |        Authoritative Server        |
-                    |  - Global Sequence Number (seq)    |
-                    |  - Thread-Safe Rooms (RLock)       |
-                    |  - Inactivity Reaper & Persistence |
-                    +------------------------------------+
-                                ^     |     ^
-                         TCP    |     |     | TCP
-                      Sockets   |     |     | Sockets
-                                v     v     v
-             +------------------+     |     +------------------+
-             |                        |                        |
-             v                        v                        v
-+-----------------------+  +-----------------------+  +-----------------------+
-|    Client A (Host)    |  |   Client B (Editor)   |  |   Client C (Viewer)   |
-| - Tkinter GUI (View)  |  | - Tkinter GUI (View)  |  | - Tkinter GUI (View)  |
-| - BoardState (Model)  |  | - BoardState (Model)  |  | - BoardState (Model)  |
-| - Net Client (Worker) |  | - Net Client (Worker) |  | - Net Client (Worker) |
-+-----------------------+  +-----------------------+  +-----------------------+
-```
+## Project files
 
-### File Hierarchy
-```
-whiteboard/
-├── protocol.py         # Wire protocol constants, framing, encode/decode routines
-├── boardstate.py       # Client-side canvas replica (pure data, zero GUI code)
-├── netclient.py        # Non-blocking TCP client worker threads (zero GUI code)
-├── server.py           # Multi-threaded authoritative TCP server (runnable)
-├── client.py           # Tkinter graphical user interface client (runnable)
-├── test_integration.py # Headless integration tests using real loopback sockets
-└── README.md           # Architecture specification, setup guide, and viva Q&A
-```
+| File | Purpose |
+|---|---|
+| `client.py` | Tkinter graphical application and user interactions |
+| `netclient.py` | Client TCP connection, sender/receiver threads, heartbeat, and reconnect logic |
+| `boardstate.py` | Client-side board replica, pending strokes, sequence tracking, and resynchronization |
+| `server.py` | Authoritative TCP server, room membership, validation, persistence, and operation sequencing |
+| `protocol.py` | Length-prefixed JSON framing and shared network/canvas constants |
+| `test_integration.py` | Headless framing, client, and real-socket server integration tests |
+| `README.md` | Setup and project documentation |
 
----
+## Requirements
 
-## 2. Network Protocol Specification & Framing
+- Python 3.10 or later.
+- Tkinter for the graphical client. It is included with most Windows Python installations; on some Linux distributions it is provided by a separate system package.
+- A TCP connection between each client and the computer running the server.
 
-### Why TCP Over UDP?
-1. **Reliability (No Lost Strokes)**: Canvas operations represent discrete state mutations. In UDP, packet loss results in permanent canvas divergence between clients. TCP guarantees delivery via acknowledgments and automatic retransmission.
-2. **Strict In-Order Delivery**: Whiteboard operations must be applied sequentially (e.g., drawing, drawing over, clearing, undoing). TCP sequence numbers enforce strict byte-stream ordering.
-3. **Flow & Congestion Control**: TCP sliding windows prevent sender bursts from overflowing receiving buffers or saturating the LAN switch.
+The server and test suite can run without opening a GUI. No `pip install` step is required.
 
-### Framing Mechanism (Solving "Sticky Packets" / Fragmentation)
-TCP is a byte-stream protocol with no intrinsic application message boundaries. Operating systems segment or coalesce packets (Nagle's algorithm). We enforce **fixed-length length-prefix framing**:
+## Run the application
 
-```
-+-----------------------------------+---------------------------------------+
-|     Length Prefix (4 Bytes)       |       JSON Payload (UTF-8 Bytes)      |
-|    Big-Endian uint32 ('>I')       |       {"t": "stroke", ...}            |
-+-----------------------------------+---------------------------------------+
+Run the following commands from the directory containing `server.py`, `client.py`, and this README. On Windows, use `python` or the Python launcher `py` if that is how Python is installed.
+
+### 1. Start the server
+
+Open a terminal and run:
+
+```powershell
+python server.py --host 0.0.0.0 --port 5050
 ```
 
-1. **Sender**: Encodes dictionary to compact UTF-8 JSON; prepends a 4-byte big-endian unsigned integer representing payload byte count $N$; invokes `sock.sendall()`.
-2. **Receiver**: Loops `sock.recv()` until exactly 4 bytes are received; unpacks $N$; loops `sock.recv()` until exactly $N$ payload bytes arrive; decodes JSON.
+The server prints its LAN IP address, listening port, and three generated four-digit codes:
 
-### Message Specification Table
+- **Room code** identifies the room for display and is shown in the client after connecting.
+- **Host code** is for the person joining with the Host role. Do not share it with participants.
+- **Room password** is required by both the host and participants.
 
-| Type (`t`) | Direction | Key Fields | Description |
-|:---|:---:|:---|:---|
-| `hello` | $C \to S$ | `room?, user, pw, create?, is_host?, host_code?, token?, last_seq?` | Initial handshake; generated-room clients send host status and host code when applicable. |
-| `welcome` | $S \to C$ | `room, seq, host, you, users, chat, canvas, mode, reconnected?, strokes \| ops` | Confirms join; delivers full snapshot or delta ops and identifies returning usernames. |
-| `stroke` | $C \to S$ | `id, s: {tool, color, width, pts, text?, bg?}` | Commits finished drawing element or sticky note. |
-| `ack` | $S \to C$ | `id, seq` | Unicast acknowledgment to stroke author. |
-| `op` | $S \to C$ | `seq, k: "stroke"\|"vis"\|"reset", u, ...` | Authoritative sequenced state change broadcast to all. |
-| `part` | $C \rightleftharpoons S$ | `sid, tool, color, width, mode, pts` | Live in-progress preview (echo-suppressed broadcast). |
-| `cursor` | $C \rightleftharpoons S$ | `u, color, x, y` | Ephemeral mouse pointer broadcast (throttled). |
-| `undo` / `redo` | $C \to S$ | *(none)* | Reverts/restores caller's last drawing action. |
-| `clear` | $C \to S$ | *(none)* | Hides all canvas strokes (Host only). |
-| `sync` | $C \to S$ | `last_seq` | Requests missing ops on sequence gap detection. |
-| `chat` | $C \rightleftharpoons S$ | `id?, user, to?, text, ts` | Group messages are broadcast to the room; private messages are delivered only to the sender and the selected active participant. Both use server timestamps and appear in chronological history. |
-| `save` | $C \to S$ | `label` | Atomically writes version snapshot to disk (Host only). |
-| `versions` | $C \to S$ | *(none)* | Queries list of saved version files. |
-| `load` | $C \to S$ | `file` | Restores canvas from version file (Host only). |
-| `setrole` | $C \to S$ | `user, role: "editor"\|"viewer"` | Modifies member permissions (Host only). |
-| `ping` / `pong`| $C \rightleftharpoons S$ | `ts` | Keepalive heartbeat and latency calculation. |
+The GUI does not ask users to type a room code: clients connecting to this server join the generated room. The three codes are distinct within that server run. The server chooses a room code that does not already have a directory under its boards folder.
 
----
+### 2. Start the host client
 
-## 3. Concurrency & Threading Architecture
+Open a second terminal on the server computer and run:
 
-### Server Concurrency Model
-- **Accept Thread**: Continuously accepts new client TCP sockets.
-- **Per-Client Reader Thread**: Decodes length-prefixed messages and dispatches handlers.
-- **Per-Client Writer Thread**: Drains a bounded `queue.Queue(maxsize=5000)`. Sends use `put_nowait()`; slow or unresponsive clients are disconnected immediately to prevent bufferbloat.
-- **TCP_NODELAY**: Enabled on all sockets to disable Nagle's algorithm for low-latency interactive drawing.
-- **Room Lock (`threading.RLock`)**: Every state mutation, sequence increment, and broadcast within a room is protected under that room's reentrant lock.
-- **Reaper Thread**: Runs every 0.2s:
-  - Disconnects clients inactive for `--timeout` seconds (default 15s) and marks them offline.
-  - Purges offline members after `--grace` seconds (default 120s).
-  - Promotes earliest-joined member if the host departs.
-  - Triggers periodic autosaves and deletes empty rooms after 30 minutes.
-
-### Client Concurrency Model
-- **Main GUI Thread**: Owns Tkinter canvas and controls; never executes blocking socket calls.
-- **Net Client Receiver Thread**: Connects socket, sends dynamic `get_hello()`, reads frames, and pushes `("conn", "msg", "disc", "fail")` events to `events_queue`.
-- **Net Client Sender Thread**: Drains outbound queue and transmits keepalive pings every 4s.
-- **Event Pump**: Polled every 15 ms via `root.after(15, self._pump_network_events)` to process network events directly on the GUI thread. Redundant cursor updates are coalesced per participant.
-
----
-
-## 4. Key Distributed Systems Algorithms
-
-### 1. Global Sequencing & Eventual Consistency
-The server maintains a strictly monotonic sequence counter (`seq`). When any mutation occurs (`stroke`, `vis`, `reset`), the room lock is acquired, `seq` is incremented, and the resulting `op` is broadcast to all participants. Because every client applies ops in strict sequence order, all canvas replicas are guaranteed to converge.
-
-### 2. Optimistic Local Echo
-When a user draws a stroke:
-1. `BoardState.add_local()` renders the stroke immediately with a pending flag (`"p": True`).
-2. The user sees instant, lag-free visual feedback without waiting for network latency.
-3. When the server broadcasts the committed `op`, the pending flag is cleared. If the server assigned an ordering different from local draw order, `strokes.move_to_end(sid)` reorders the canvas and redraws.
-
-### 3. Gap Detection & Successor Draining
-Clients verify incoming op sequence numbers:
-- `op.seq <= local_seq`: Duplicate message; ignored.
-- `op.seq == local_seq + 1`: In-order op; applied immediately, followed by draining any consecutive buffered successors.
-- `op.seq > local_seq + 1`: Sequence gap; op is stored in `buffer`, and client issues a `sync` request to retrieve missing delta ops.
-
-### 4. Deduplication & Idempotence
-The server tracks `Room.seen` mapping `stroke_id -> seq`. If a client re-transmits a stroke after a network reconnect, the server detects the duplicate, skips re-application, and returns an `ack` containing the original sequence number.
-
-### 5. Isolated Per-User Undo/Redo
-- Undo and redo operate exclusively on the caller's actions.
-- Stacks store `("s", stroke_id)` or `("c", [ids])` (clear history).
-- Operations emit a sequenced `vis` op (`hide: [...]`, `show: [...]`).
-- If an entry produces no net visual change (e.g. stroke was already hidden by a clear), the stack skips it iteratively until an actionable stroke is found.
-- Clear canvas is restricted to the host; it hides all visible strokes in one `vis` op and pushes `("c", ids)` onto the host's undo stack, enabling undo/redo of the clear.
-
-### 6. Path-Traversal Proof Versioning
-When a host saves a version, the state is written to `boards/<room>/<timestamp>_<label>.json` atomically using a temporary file (`.tmp`) and `os.replace`. When restoring, the server uses `os.path.basename()` and verifies that the file exists in the room directory, strictly rejecting path traversal attacks such as `../../etc/passwd`.
-
----
-
-## 5. How to Run & Verify
-
-### Starting the Server
-```bash
-python3 whiteboard/server.py --host 0.0.0.0 --port 5050
-```
-The server starts without terminal input and prints a unique four-digit room code, four-digit host code, and four-digit room password. Share the room password with participants; only the host should use the host code.
-
-The server automatically detects your outbound LAN IP via an unreachable UDP socket to `10.255.255.255` (no packets transmitted). The room code and password are displayed in the client after connection.
-
-### Starting Clients
-```bash
-# Select Host or Participant in the GUI. The host enters the host code
-# and room password; participants enter only the room password.
-# Connect to local machine:
-python3 whiteboard/client.py --host 127.0.0.1 --port 5050
-
-# Connect across LAN:
-python3 whiteboard/client.py --host 192.168.1.X --port 5050
+```powershell
+python client.py --host 127.0.0.1 --port 5050
 ```
 
-### Running the Headless Integration Test Suite
-```bash
-python3 whiteboard/test_integration.py
+In the client, select **Host**, enter a display name, the room password, and the host code printed by the server, then connect.
+
+### 3. Join from other devices
+
+On each other computer, run the client with the server's LAN IP address and port. For example:
+
+```powershell
+python client.py --host 192.168.1.50 --port 5050
 ```
 
----
+Replace `192.168.1.50` with the address printed by the server. Select **Participant**, enter a display name and the room password, then connect. Participants do not need the host code.
 
-## 6. Lab Viva Q&A Cheat Sheet
+For devices on the same computer, use `127.0.0.1`. For devices on other computers, use the server computer's reachable LAN address, not `127.0.0.1`. If clients cannot connect, allow inbound TCP traffic on the selected port through the server computer's firewall for the trusted/private network profile.
 
-### Q1: Why did you choose TCP instead of UDP for the whiteboard?
-> **Answer**: Whiteboard operations represent state mutations that cannot be lost or reordered without corrupting the drawing. TCP provides guaranteed delivery via acknowledgments and automatic retransmission, strict sequence ordering, and flow control. UDP provides best-effort delivery with no packet ordering, which would require reimplementing reliability and reassembly buffers at the application layer.
+Stop the server with **Ctrl+C**. Start the server before connecting clients.
 
-### Q2: Why is length-prefix framing necessary in TCP?
-> **Answer**: TCP is a stream-oriented protocol (RFC 793) with no concept of message boundaries. The OS network stack may segment a single large message across multiple packets or coalesce multiple small messages into a single packet via Nagle's algorithm. Length-prefix framing prepends each payload with a fixed 4-byte big-endian integer denoting payload byte count, allowing the receiver to reliably delineate and reconstruct complete messages.
+### Command-line options
 
-### Q3: How do you prevent the GUI from freezing during network calls?
-> **Answer**: All blocking socket operations (`connect`, `recv`, `sendall`) run on background worker threads managed by `Net`. The Tkinter GUI main thread communicates with the network layer via a thread-safe `queue.Queue`. The GUI polls this queue every 15 ms using `root.after()`, keeping window redrawing and user input responsive at all times.
+#### Server
 
-### Q4: How does your architecture ensure all clients see the exact same drawing order?
-> **Answer**: We use an authoritative central server. Every drawing action is submitted to the server, which acquires the room's `RLock`, assigns a strictly monotonic sequence number (`seq`), records the op in the room log, and broadcasts the op to all online members. Every client applies operations strictly in sequence order, ensuring eventual consistency across all replicas.
+| Option | Default | Description |
+|---|---:|---|
+| `--host` | `0.0.0.0` | IPv4 interface to bind to. `0.0.0.0` listens on all local IPv4 interfaces. |
+| `--port` | `5050` | TCP listening port. |
+| `--boards` | `boards` | Directory for autosaves and version files. A relative path is resolved from the directory containing `server.py`. |
+| `--timeout` | `15` seconds | Inactivity timeout for a connected client. |
+| `--grace` | `120` seconds | How long an offline member is retained for reconnecting before being removed. |
 
-### Q5: What is optimistic UI rendering and how does your client handle it?
-> **Answer**: When a user draws a stroke, `BoardState.add_local()` renders the stroke immediately with a pending flag (`"p": True`) before the server acknowledges it, eliminating perceived network latency. When the server's sequenced `op` arrives, the pending flag is cleared. If other clients drew strokes concurrently that were sequenced before this stroke by the server, the client adjusts the z-order and redraws to match authoritative server order.
+Example:
 
-### Q6: How does per-user undo/redo work without breaking other users' strokes?
-> **Answer**: Each user has dedicated `undo_stack` and `redo_stack` structures storing `("s", stroke_id)` or `("c", [ids])`. Undo does not delete data; it commits a sequenced `vis` op with `hide: [stroke_id]`. Redo emits `vis` with `show: [stroke_id]`. Because strokes are toggled rather than deleted, z-order is preserved and peers' strokes are unaffected.
+```powershell
+python server.py --host 0.0.0.0 --port 5050 --timeout 20 --grace 180
+```
 
-### Q7: How do you handle dead or half-open TCP connections?
-> **Answer**: If a client abruptly loses network connectivity (e.g. Wi-Fi dropped), TCP sockets on the server can remain open indefinitely. The server runs a background reaper thread that monitors client activity timestamps: clients with no network traffic for `--timeout` seconds (default 15s) are forcibly closed and marked offline. Clients periodically transmit a keepalive `ping` every 4 seconds to maintain active status when idle.
+#### Client
 
-### Q8: What prevents a malicious client from performing a path-traversal attack during file restoration?
-> **Answer**: In `_handle_load`, the requested filename is sanitized using `os.path.basename()` to strip directory paths. The server verifies that the sanitized name exactly matches the input, ends in `.json`, and is present in the whitelist of files returned by `os.listdir(room_dir)`. Traversal strings like `../../etc/passwd` are rejected with error code `"bad_file"`.
+| Option | Default | Description |
+|---|---:|---|
+| `--host` | `127.0.0.1` | Server IP address to prefill in the connection window. |
+| `--port` | `5050` | Server port to prefill in the connection window. |
 
-### Q9: What happens if a slow client cannot keep up with high-frequency stroke broadcasts?
-> **Answer**: Each client connection has a dedicated writer thread draining a bounded `queue.Queue(maxsize=5000)`. When broadcasting, the server uses `send_queue.put_nowait()`. If a client's queue fills up, the server catches `queue.Full` and immediately disconnects that client, preventing bufferbloat and protecting the server and other participants from degradation.
+Example:
 
-### Q10: How do reconnecting clients recover missed operations without redrawing the entire canvas?
-> **Answer**: Reconnecting clients submit their secret session token and their last known sequence number (`last_seq`) in their `hello` handshake. The client stores the token in the current OS user's application-data folder, keyed by server and username (never storing the room password), so the same user can reclaim the session after returning to login or restarting the client. The server also retains the room's username history and labels returning usernames as reconnected. If `last_seq` is valid, the server replies with `mode: "delta"` containing only operations committed since that sequence (`room.log[last_seq:]`), allowing the client to catch up incrementally without requesting a full canvas snapshot.
+```powershell
+python client.py --host 192.168.1.50 --port 5050
+```
+
+## Using the whiteboard
+
+### Tools and canvas behavior
+
+- **Pen, line, rectangle, oval, text, and note** are available in the toolbar.
+- The width control ranges from 1 to 30. The eraser sends a white stroke three times the selected width (up to 90 px); it paints over content on the white canvas rather than deleting earlier strokes.
+- The text tool places text at the selected point. The note tool creates a sticky note. Text is limited to 300 characters.
+- The canvas is white and 1200 x 700 logical pixels. Server-side coordinate validation allows values with an absolute value below 10,000; the protocol's coordinate range is wider than the visible canvas.
+- Use **Export (.ps)** to export the visible Tkinter canvas as a PostScript file.
+
+### Roles and permissions
+
+| Role | Permissions |
+|---|---|
+| Host | Draw and chat; clear the canvas; enable or disable presentation mode; change participant roles; kick participants; save and restore versions. |
+| Editor | Draw, use personal undo/redo, and chat. |
+| Viewer | Observe the board and chat; drawing and editing actions are denied by the server. |
+
+Participants join as editors by default. The host can change a participant to editor or viewer from the participant list. In presentation mode, non-host participants are read-only; the host retains editing access.
+
+Undo and redo apply to the caller's own drawing actions. Erasing is stored as a white stroke, so undoing it removes that white stroke from view. A host clear hides all currently visible strokes as one operation; the host can undo or redo that clear.
+
+### Chat
+
+Chat supports room-wide messages and private messages to an active participant. Messages are limited to 500 characters. The server keeps a bounded chat history and includes recent messages when a client joins.
+
+## How synchronization works
+
+The server is authoritative for committed canvas changes:
+
+1. While a user draws, the client renders locally and sends occasional uncommitted preview (`part`) messages to peers.
+2. On release, the client submits a completed stroke. The server validates it, assigns the next room sequence number, records the operation, broadcasts it, and acknowledges the sender.
+3. Clients apply sequenced operations in order. Duplicate operations are ignored; operations received across a sequence gap are buffered while the client requests a delta or a full snapshot.
+
+The local preview keeps drawing responsive, but the server-assigned sequence determines the shared committed order. Cursor positions and in-progress previews are transient and are not part of the committed operation log. The GUI schedules its network event pump every 15 ms and coalesces redundant cursor updates per participant; drawing previews and committed operations are not coalesced.
+
+### TCP message framing
+
+TCP is a byte stream and does not preserve application message boundaries. Each protocol message is compact UTF-8 JSON preceded by a four-byte unsigned big-endian payload length:
+
+```text
++-------------------------------+----------------------------------+
+| 4-byte length prefix ('>I')   | UTF-8 JSON payload               |
++-------------------------------+----------------------------------+
+```
+
+The receiver reads the full header and then the number of payload bytes specified by the header. The protocol rejects empty or oversized frames; the maximum payload is 4 MiB. `TCP_NODELAY` is enabled on client and accepted server sockets to avoid Nagle buffering on interactive messages.
+
+### Message families
+
+| Direction | Message types | Purpose |
+|---|---|---|
+| Client to server | `hello` | Join or reconnect, with credentials and, when available, a session token and last applied sequence. |
+| Client to server | `stroke`, `undo`, `redo`, `clear` | Submit completed drawing or board-edit operations. |
+| Client to server | `part`, `cursor` | Send transient drawing previews and cursor positions. |
+| Client to server | `chat`, `save`, `versions`, `load` | Chat and host version-management requests. |
+| Client to server | `setrole`, `present`, `kick`, `sync`, `ping`, `leave` | Participant management, presentation mode, state recovery, heartbeat, and disconnect. |
+| Server to client | `welcome`, `users`, `notice` | Join result, room snapshot/delta, roster, and room notices. |
+| Server to client | `op`, `ack`, `part`, `cursor` | Sequenced committed operations, stroke acknowledgement, and transient peer updates. |
+| Server to client | `chat`, `versions`, `saved`, `delta`, `snapshot`, `pong`, `err` | Chat, version results, synchronization/heartbeat responses, and errors. |
+
+## Architecture and limits
+
+### Server
+
+- A listener accepts TCP connections. Each client session has a reader thread and a writer thread.
+- Each room uses a re-entrant lock to serialize state changes, sequence assignment, and broadcasts.
+- Each client has a bounded outgoing queue of 5,000 messages. If a slow client fills its queue, that client is disconnected rather than allowing its backlog to grow without limit.
+- A background reaper checks client activity every 0.2 seconds. With the default settings, inactive connections time out after 15 seconds and offline members are retained for 120 seconds for reconnection.
+- A room supports up to 30 members. A connection is limited to 400 incoming messages per second.
+
+### Client
+
+- Tkinter owns all GUI and canvas updates on the main thread.
+- A receiver thread reads the server connection and puts events into a thread-safe queue; a sender thread transmits queued messages and sends an idle heartbeat about every four seconds.
+- After a previously successful connection drops, the client retries after two seconds. Reconnection uses a session token and the last applied sequence to request missed operations where possible.
+- The session token is saved in the current user's application-data/state directory, scoped to server address, port, and username. The room password is not saved by the client.
+
+## Validation and persistence
+
+- Generated room, host, and password codes are four digits. Usernames must be 1-24 characters and use letters, digits, spaces, `.`, `_`, or `-`.
+- Supported stroke tools are pen, eraser, line, rectangle, oval, and text. Ordinary stroke widths are 1-60; eraser widths are 1-90. A stroke can contain 1-8,000 finite points; coordinates must have absolute values below 10,000.
+- Chat text is limited to 500 characters; text and sticky-note content are limited to 300 characters.
+- The server stores board data under `boards/<room-code>/` by default. Dirty rooms are autosaved periodically (every 30 seconds), when a room becomes empty, and when the server shuts down. Host-created version snapshots are separate timestamped JSON files and can be listed and loaded during the room session.
+- Version loading accepts only JSON files in that room's version directory and rejects path-containing filenames.
+
+**Room lifecycle note:** the command-line server creates a new generated room code on each launch. Existing board files remain on disk, but the GUI does not provide a room-code field for reopening an old generated room, and a new generated room does not automatically load the previous launch's autosave. Keep the `boards` directory if you want to retain saved files.
+
+## Security and network scope
+
+This project is intended for a trusted LAN. The protocol uses TCP JSON without TLS, so network traffic, including room credentials, is not encrypted in transit. Do not expose the server port to the public internet. The server validates incoming messages, limits message/frame sizes and client rates, and restricts version loading to the room's version directory; these checks do not replace transport encryption or network access controls.
+
+The server stores a salted password hash rather than the room password. The LAN IP printed at startup is a best-effort address selected from the machine's network routing; if it is unavailable or incorrect, use the server computer's reachable LAN IPv4 address.
+
+## Tests
+
+From the directory containing `test_integration.py`, run:
+
+```powershell
+python -m unittest test_integration
+```
+
+The headless suite uses socket pairs and real loopback TCP connections. It covers message framing, joining and authentication, validation and role permissions, state synchronization, concurrent drawing convergence, undo/redo, chat, reconnects, heartbeats, and version persistence/loading.
+
+## Troubleshooting
+
+- **`python` is not recognized:** try `py` in place of `python`, or add the Python installation to `PATH`.
+- **Tkinter import/window error:** use a Python installation that includes Tk support. Some Linux installations require their distribution's Tkinter package.
+- **Connection refused:** make sure the server is running and the client port matches the server port.
+- **Other devices cannot connect:** use the server's LAN IP, check that devices can reach each other, and allow inbound TCP on the server port in the private-network firewall profile.
+- **Host cannot connect:** select **Host** and enter both the host code and room password. Participants use the room password but not the host code.
+- **A previous board is not listed after restarting the server:** each CLI server launch generates a fresh room. Existing room files are not automatically attached to that new room.
+
+## Lab discussion notes
+
+**Why TCP?** Completed drawing operations must be delivered reliably and in order on each connection. TCP provides reliable ordered byte-stream delivery; the server's sequence numbers provide a single order across concurrent users.
+
+**Why length-prefix framing?** TCP may split or combine writes. The four-byte length prefix lets the receiver read exactly one JSON message regardless of packet boundaries.
+
+**How is the GUI kept responsive?** Socket reads and writes run in worker threads. The GUI thread applies queued events and updates Tkinter widgets; network I/O does not run in the drawing callbacks.
+
+**How do all clients converge?** The server validates and sequences each committed change under the room lock. Clients apply operations by sequence, buffer gaps, and request a delta or snapshot when needed.
+
+**How does undo work?** Undo and redo submit visibility operations for the caller's own strokes. Strokes remain in board history; undo does not remove another participant's work.
+
+**How does reconnect recovery work?** The client retains a per-identity session token and last applied sequence. When reconnecting to the same running room, the server can send the operations committed after that sequence; otherwise it supplies a snapshot.
