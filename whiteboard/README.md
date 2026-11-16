@@ -9,9 +9,10 @@ The project is implemented with the Python standard library. It does not need a 
 - Shared 1200 x 700 canvas with pen, white-stroke eraser, line, rectangle, oval, text, and sticky-note tools.
 - Adjustable stroke width, quick color palette, and native color picker.
 - Live drawing previews, participant cursors, and group or private chat.
+- An online-only active-user roster, recent join/leave activity, and per-user colors.
 - Host, editor, and viewer roles. The host can also enable presentation mode, clear the board, manage participants, and save or load board versions.
 - Per-user undo and redo. The host can undo and redo a canvas clear.
-- Automatic reconnect attempts and board-state synchronization after a network interruption.
+- Automatic reconnect attempts, identity-token rejoining, and board-state synchronization after a network interruption.
 - Server-side autosaves and labeled version snapshots.
 
 ## Project files
@@ -25,6 +26,8 @@ The project is implemented with the Python standard library. It does not need a 
 | `protocol.py` | Length-prefixed JSON framing and shared network/canvas constants |
 | `test_integration.py` | Headless framing, client, and real-socket server integration tests |
 | `README.md` | Setup and project documentation |
+
+The repository root also contains `build.bat` and `build.sh` for PyInstaller packaging, `tests/MANUAL_TEST.md` for a LAN demonstration checklist, `docs/` for presentation and video-script materials, `generate_pdf_docs.py` / `generate_presentation.py` for generating the project documents, and `HANDOFF.md` with project handoff notes. The checked-in PDF and PowerPoint are generated deliverables. PyInstaller is only needed to build standalone executables; it is not needed to run the Python application.
 
 ## Requirements
 
@@ -74,6 +77,8 @@ python client.py --host 192.168.1.50 --port 5050
 
 Replace `192.168.1.50` with the address printed by the server. Select **Participant**, enter a display name and the room password, then connect. Participants do not need the host code.
 
+The server creates one generated room when it starts. The host and participants connect to the same server address and port; the room code is displayed by the server and in the connected client, rather than entered in the login form. The host must select **Host** and supply the host code. Other users select **Participant** and supply the room password. The first member of a room created through the server API becomes host; for the normal command-line launch, the host role is explicitly verified with the generated host code. The host code and room password are separate four-digit values.
+
 For devices on the same computer, use `127.0.0.1`. For devices on other computers, use the server computer's reachable LAN address, not `127.0.0.1`. If clients cannot connect, allow inbound TCP traffic on the selected port through the server computer's firewall for the trusted/private network profile.
 
 Stop the server with **Ctrl+C**. Start the server before connecting clients.
@@ -109,6 +114,10 @@ Example:
 python client.py --host 192.168.1.50 --port 5050
 ```
 
+### Build standalone executables (optional)
+
+From the repository root, run `build.bat` on Windows or `./build.sh` on macOS/Linux. Both scripts require PyInstaller at build time and package a console server executable and a windowed client executable into `dist/`. Running from Python does not require PyInstaller.
+
 ## Using the whiteboard
 
 ### Tools and canvas behavior
@@ -133,7 +142,23 @@ Undo and redo apply to the caller's own drawing actions. Erasing is stored as a 
 
 ### Chat
 
-Chat supports room-wide messages and private messages to an active participant. Messages are limited to 500 characters. The server keeps a bounded chat history and includes recent messages when a client joins.
+The sidebar has a chat transcript, a recipient selector, and a message entry. **Everyone** sends a room-wide message; selecting an active participant sends a private message visible to the sender and recipient. Private messages cannot be sent to yourself or to a user who is no longer online. Messages are trimmed and limited to 500 characters, tagged with the sender's assigned color, and timestamped by the server. The server keeps separate bounded group and private histories; on join it returns the latest 200 messages the member is entitled to see (all group messages and private messages involving that member). Chat records are included in room autosaves. Private history is scoped to live member identities, which are recreated after a server restart, so previous private messages are not shown in a new server process; group history is restored.
+
+### Joining, active users, and activity
+
+- The login window collects server IP, port, display name, and the four-digit room password. Selecting **Host** reveals the host-code field. The client validates the required fields before connecting; the server independently validates credentials, room membership, username format, and capacity.
+- A successful handshake returns the room code, assigned role and color, session token, current online roster, recent authorized chat history, presentation state, and either a full board snapshot or a delta. The board window opens after this welcome message is processed.
+- The sidebar roster is explicitly **Active Users**: it filters out offline members and marks the local user with “(you)”. It shows host, participant/editor, or viewer role. The same online roster refreshes after joins, disconnects, role changes, and removals; the active recipients in this list also populate the private-chat selector.
+- A separate **Recent Activity** panel records the local join/rejoin and server notices such as another user's join, reconnect, departure, or host promotion. It keeps the latest 50 displayed activity lines in the client. Offline users remain reserved on the server during the grace period, but do not appear in the active roster.
+- Each new member receives an available color from a fixed 20-color palette. The host can right-click an active participant to change editor/viewer role or kick them. Viewers and non-host users during presentation mode cannot draw; the server enforces these permissions even if a client sends an operation directly.
+
+### Rejoining and recovery
+
+- Each member has a server-issued random session token. The client stores it in the current OS user's application-data/state directory, scoped to the server address, port, and username. The room password is never stored there; the server validates the password on every connection. Within a running client, an in-memory token is reused only for the matching connection context.
+- A returning username is recognized from room username history, which is included in autosaves. If that username is still reserved, only its matching token can reclaim the member record; a different client using the same name is rejected as `name_taken`. A previously seen username is reported as reconnected even if its old membership has expired, but it receives a new member record in that case.
+- When a token is available, the client sends it and its last applied room sequence in `hello`. If that sequence is an integer within the server's retained sequence range, the server returns subsequent operations as a delta; otherwise it returns a full snapshot. The client applies the recovery before displaying the board and then retransmits local pending strokes. Stroke IDs are deduplicated by the server, so a stroke that was committed just before a disconnect is not committed twice.
+- After a connection has once received `welcome`, the network worker retries a dropped connection every two seconds and sends a fresh handshake with the latest sequence and token. Initial connection/authentication failures return to the login screen instead of retrying indefinitely. The receiver has a 12-second socket read timeout; an idle sender heartbeat is sent about every four seconds. The server marks timed-out or disconnected members offline and broadcasts the roster and a notice. Offline membership is reserved for the configurable grace period (120 seconds by default), then removed; if the host expires, the earliest-joined online member is promoted.
+- Manual **Leave** sends a leave message, while abrupt closes and network loss are detected through socket shutdown or heartbeat timeout. The client keeps its displayed board during automatic reconnect attempts. Once all members are offline, the server autosaves; an empty in-memory room is reclaimed after 30 minutes.
 
 ## How synchronization works
 
@@ -143,7 +168,7 @@ The server is authoritative for committed canvas changes:
 2. On release, the client submits a completed stroke. The server validates it, assigns the next room sequence number, records the operation, broadcasts it, and acknowledges the sender.
 3. Clients apply sequenced operations in order. Duplicate operations are ignored; operations received across a sequence gap are buffered while the client requests a delta or a full snapshot.
 
-The local preview keeps drawing responsive, but the server-assigned sequence determines the shared committed order. Cursor positions and in-progress previews are transient and are not part of the committed operation log. The GUI schedules its network event pump every 15 ms and coalesces redundant cursor updates per participant; drawing previews and committed operations are not coalesced.
+The local preview keeps drawing responsive, but the server-assigned sequence determines the shared committed order. Cursor positions and in-progress previews are transient and are not part of the committed operation log. The GUI schedules its network event pump every 15 ms and coalesces queued cursor updates to the latest position per participant during each pump; drawing previews and committed operations are not coalesced. Pen and eraser fragments and shape previews are sent at about 40 ms intervals while dragging. Remote cursors are drawn as labeled colored markers and removed after three seconds without an update. Ping/pong timestamps update the displayed round-trip latency.
 
 ### TCP message framing
 
@@ -175,10 +200,11 @@ The receiver reads the full header and then the number of payload bytes specifie
 ### Server
 
 - A listener accepts TCP connections. Each client session has a reader thread and a writer thread.
+- A newly accepted connection must complete its initial `hello` handshake within 10 seconds.
 - Each room uses a re-entrant lock to serialize state changes, sequence assignment, and broadcasts.
 - Each client has a bounded outgoing queue of 5,000 messages. If a slow client fills its queue, that client is disconnected rather than allowing its backlog to grow without limit.
 - A background reaper checks client activity every 0.2 seconds. With the default settings, inactive connections time out after 15 seconds and offline members are retained for 120 seconds for reconnection.
-- A room supports up to 30 members. A connection is limited to 400 incoming messages per second.
+- A room supports up to 30 retained members, including offline members during their grace period. A connection is limited to 400 incoming messages per second.
 
 ### Client
 
@@ -192,14 +218,14 @@ The receiver reads the full header and then the number of payload bytes specifie
 - Generated room, host, and password codes are four digits. Usernames must be 1-24 characters and use letters, digits, spaces, `.`, `_`, or `-`.
 - Supported stroke tools are pen, eraser, line, rectangle, oval, and text. Ordinary stroke widths are 1-60; eraser widths are 1-90. A stroke can contain 1-8,000 finite points; coordinates must have absolute values below 10,000.
 - Chat text is limited to 500 characters; text and sticky-note content are limited to 300 characters.
-- The server stores board data under `boards/<room-code>/` by default. Dirty rooms are autosaved periodically (every 30 seconds), when a room becomes empty, and when the server shuts down. Host-created version snapshots are separate timestamped JSON files and can be listed and loaded during the room session.
-- Version loading accepts only JSON files in that room's version directory and rejects path-containing filenames.
+- The server stores board data under `boards/<room-code>/` by default. Dirty rooms are autosaved periodically (every 30 seconds), when a room becomes empty, and when the server shuts down. Host-created version snapshots are timestamped JSON files in the same room directory as the autosave and can be listed and loaded during the room session. The autosave includes the room's salt and password hash, host name, sequence and operation log, strokes, group and private chat records, canvas dimensions, and seen usernames. It does not persist undo/redo stacks or presentation mode. A version snapshot is used to restore the board, not to rewind membership or chat.
+- Version loading revalidates strokes, restores them as visible, and broadcasts one sequenced reset operation. The requested filename must be a JSON file in that room directory; path-containing filenames are rejected.
 
 **Room lifecycle note:** the command-line server creates a new generated room code on each launch. Existing board files remain on disk, but the GUI does not provide a room-code field for reopening an old generated room, and a new generated room does not automatically load the previous launch's autosave. Keep the `boards` directory if you want to retain saved files.
 
 ## Security and network scope
 
-This project is intended for a trusted LAN. The protocol uses TCP JSON without TLS, so network traffic, including room credentials, is not encrypted in transit. Do not expose the server port to the public internet. The server validates incoming messages, limits message/frame sizes and client rates, and restricts version loading to the room's version directory; these checks do not replace transport encryption or network access controls.
+This project is intended for a trusted LAN. The protocol uses TCP JSON without TLS, so network traffic, including room credentials, is not encrypted in transit. Do not expose the server port to the public internet. The server validates incoming messages, limits message/frame sizes and client rates, and restricts version loading to JSON files in the room's board directory; these checks do not replace transport encryption or network access controls.
 
 The server stores a salted password hash rather than the room password. The LAN IP printed at startup is a best-effort address selected from the machine's network routing; if it is unavailable or incorrect, use the server computer's reachable LAN IPv4 address.
 
@@ -211,7 +237,7 @@ From the directory containing `test_integration.py`, run:
 python -m unittest test_integration
 ```
 
-The headless suite uses socket pairs and real loopback TCP connections. It covers message framing, joining and authentication, validation and role permissions, state synchronization, concurrent drawing convergence, undo/redo, chat, reconnects, heartbeats, and version persistence/loading.
+The headless suite uses socket pairs and real loopback TCP connections. It covers message framing, generated-code authentication, username collisions, active/offline presence, joining and rejoining, token persistence and identity scoping, autosaved username history, validation and role permissions, state synchronization, concurrent drawing convergence, undo/redo, group/private chat history and routing, reconnects, heartbeats, cursor coalescing, and version persistence/loading.
 
 ## Troubleshooting
 
